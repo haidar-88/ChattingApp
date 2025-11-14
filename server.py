@@ -35,11 +35,12 @@ def handle_client(clientSocket, ip, port):
                         print('Error Sending Peer Discovery Content.')
                 elif message.upper().startswith("PING"):
                     active_clients[clientSocket]['last_seen'] = time.time()
+                    clientSocket.send('ACK'.encode())
 
             except socket.timeout:
                     pass # no data received in this interval, continue
             
-            if time.time() - active_clients[clientSocket]['last_seen'] > 30:
+            if time.time() - active_clients[clientSocket]['last_seen'] > 60:
                 print(f"Client timed out: {ip}:{port}")
                 # Log to JSON file
                 write_to_log_file(ip, port, False, time.time())
