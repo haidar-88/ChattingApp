@@ -8,7 +8,7 @@ from PyQt5.QtCore import Qt
 
 from network import NetworkManager
 from gui import ChatWindow
-from threading_utils import (
+from threading_utils import ( #TODO: Add threading utils for server communication, TCP listener, UDP listener, and file transfer
     ServerCommunicationThread,
     TCPListenerThread,
     UDPListenerThread,
