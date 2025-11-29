@@ -9,7 +9,7 @@ class ChatWindow(QMainWindow):
     def __init__(self, network_manager):
         super().__init__()
         self.network_manager = network_manager
-        self.setWindowTitle("P2P Chat Application")
+        self.setWindowTitle(f"XChat | Username: {self.network_manager.username}")
         self.setGeometry(100, 100, 700, 500)
 
         self.current_peer = None
@@ -27,7 +27,7 @@ class ChatWindow(QMainWindow):
         main_widget.setLayout(self.main_layout)
 
         # Server status
-        self.server_status_label = QLabel("Server: Unknown")
+        self.server_status_label = QLabel("Server Status: Please Wait")
         self.main_layout.addWidget(self.server_status_label)
 
         # Peer list
@@ -155,10 +155,8 @@ class ChatWindow(QMainWindow):
             return
         file_path, _ = QFileDialog.getOpenFileName(self, "Select File to Send")
         if file_path:
-            self.display_message("", f"Sending file: {file_path}", outgoing=True)
             for chunk_number, chunk_size in self.network_manager.send_file_udp(self.current_peer, file_path):
                 self.file_progress_label.setText(f"Sent chunk {chunk_number}, size {chunk_size} bytes")
-            self.display_message("", f"File transfer completed: {file_path}", outgoing=True)
             self.file_progress_label.setText("")
 
     def handle_file_start(self, metadata, addr=None):
@@ -177,7 +175,6 @@ class ChatWindow(QMainWindow):
 
     def handle_file_end(self, metadata, addr=None):
         sender_username = metadata.get("sender", self.current_peer)
-        self.display_message("System", f"File received: {self.incoming_file_name} from {sender_username}")
         self.file_progress_label.setText("")
         self.add_clickable_file_message(self.incoming_file_name, self.incoming_file_buffer)
         self.incoming_file_buffer = None

@@ -2,6 +2,8 @@ from socket import *
 import json
 import threading
 import time
+import base64
+from rsa_utils import load_key_for_server
 
 serverPort = 7777
 serverIP = '127.0.0.1'
@@ -17,17 +19,21 @@ def write_to_log_file(ip, port, alive, timestamp):
 
 def get_username_and_ports(clientSocket):
     try:
-        data = clientSocket.recv(2048).decode()
+        data = clientSocket.recv(4096).decode()
         print("Received raw:", repr(data))
 
-        user_part, ports_part = data.split("||")
+        user_part, ports_part, key_part = data.split("||")
 
         username = user_part.split(":")[1].strip()
 
         tcp_port = ports_part.split(",")[0].split(":")[1].strip()
         udp_port = ports_part.split(",")[1].split(":")[1].strip()
 
-        return username, int(tcp_port), int(udp_port)
+        public_key_b64 = key_part.split(":")[1].strip()
+        public_key_bytes = base64.b64decode(public_key_b64)
+        public_key = load_key_for_server(public_key_bytes)
+
+        return username, int(tcp_port), int(udp_port), public_key
 
     except Exception as e:
         print("Error extracting client info:", e)
@@ -35,7 +41,7 @@ def get_username_and_ports(clientSocket):
 
 def handle_client(clientSocket, clientAddress):
     ip, port = clientAddress[0], clientAddress[1]
-    username, tcp_port, udp_port = get_username_and_ports(clientSocket)
+    username, tcp_port, udp_port, public_key = get_username_and_ports(clientSocket)
 
     if username is None:
         print("Client disconnected or sent invalid data.")
@@ -46,6 +52,7 @@ def handle_client(clientSocket, clientAddress):
     active_clients[username] = {
                         "socket": clientSocket,
                         "address": (ip, port),
+                        "public_key": public_key,
                         "tcp_listener": tcp_port,
                         "udp_listener": udp_port,
                         "last_seen": time.time()
@@ -70,6 +77,7 @@ def handle_client(clientSocket, clientAddress):
                                 "ip": info["address"][0],
                                 "tcp_port": info["tcp_listener"],
                                 "udp_port": info["udp_listener"], 
+                                "public_key": base64.b64encode(info["public_key"].save_pkcs1()).decode()
                             }
                             for user, info in active_clients.items()
                         }

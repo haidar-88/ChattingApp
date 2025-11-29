@@ -3,6 +3,8 @@ import sys
 from PyQt5.QtWidgets import QApplication, QInputDialog, QMessageBox
 from gui import ChatWindow
 import random
+from rsa_utils import *
+import os
 
 from network import NetworkManager
 from threading_utils import (
@@ -23,12 +25,25 @@ class ChatClient:
 
         if not ok or not username.strip():
             username = 'User' + random.randint(1,1000)
-        
-        self.app.setApplicationName(f"XChat | Username: {username}")
 
+        priv_path = f"keys\\{username}_private.pem"
+        pub_path = f"keys\\{username}_public.pem"
+
+        # Load if exists, else generate
+        if os.path.exists(priv_path) and os.path.exists(pub_path):
+            private_key = load_private_key(priv_path)
+            public_key = load_public_key(pub_path)
+        else:
+            private_key, public_key = generate_rsa_keypair()
+            save_private_key(priv_path, private_key)
+            save_public_key(pub_path, public_key)
 
         # Initialize network manager
-        self.network_manager = NetworkManager(username=username.strip())
+        self.network_manager = NetworkManager(
+            username=username.strip(),
+            private_key=private_key,
+            public_key=public_key
+        )
 
         # Initialize GUI
         self.gui = ChatWindow(self.network_manager)
@@ -72,8 +87,12 @@ class ChatClient:
         self.server_thread.server_connection_status.connect(self.gui.update_server_status)
         self.server_thread.start()
 
-    # ------------------- Message Handling -------------------
 
+    def GenerateEncryptionKeys(bits = 2048): #RSA to enrcrypt the AES symmetric key in order to exchange it securly 
+        public_key, private_key = rsa.newkeys(bits)
+        return private_key, public_key
+
+    # ------------------- Message Handling -------------------
     def handle_send_message(self):
         if not self.gui.current_peer:
             QMessageBox.warning(self.gui, "Error", "Please select a peer first.")

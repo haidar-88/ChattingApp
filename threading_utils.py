@@ -15,13 +15,13 @@ class ServerCommunicationThread(QThread):
     def run(self):
         if self.network_manager.connect_to_server():
             print('Connected to server')
-        if self.network_manager.send_username_and_ports():
+        if self.network_manager.send_username_ports_key():
             print('Username and Ports sent')
         heartbeat_timer = 0
         while self.running:
             time.sleep(2)
             peers = self.network_manager.request_peer_list()
-            print('Peer List: ', peers)
+            #print('Peer List: ',[ name for name, info in peers.items()])
             self.peer_list_updated.emit(peers)
             if heartbeat_timer >= 30:
                 if heartbeat_timer > 60:
@@ -63,36 +63,15 @@ class TCPListenerThread(QThread):
                 
     def handle_peer(self, client_socket, addr):
         while self.running:
-            message = self.network_manager.receive_tcp_message(client_socket).strip()
-            print('Before Splitting: ', message)
-            parts = message.split('|')
-            peer_username = parts[0]
-            message = parts[1]
-            
-            if not message or not peer_username:
-                print(f"[TCP] {peer_username} disconnected.")
-                self.connection_closed.emit(peer_username)
-                break
-            if peer_username not in self.network_manager.active_peer_connections:
-                self.network_manager.active_peer_connections[peer_username] = client_socket
-
+            peer_username, message = self.network_manager.receive_tcp_message(client_socket)
+            if message is None:
+                continue
+            message = message.strip()
             self.message_received.emit(peer_username, message)
 
     
     def stop(self):
         self.running = False
-
-
-
-
-
-
-
-
-
-
-
-
 
 # ------------------- UDP Listener -------------------
 class UDPListenerThread(QThread):
@@ -108,7 +87,8 @@ class UDPListenerThread(QThread):
     def run(self):
         self.network_manager.start_udp_listener()
         while self.running:
-            msg_type, data, addr = self.network_manager.receive_udp_message()
+            msg_type, data = self.network_manager.receive_udp_message()
+            #print("FROM THREADS IN UDP LISTENER TRYING TO SEE COMMUNICATION: ", msg_type, data)
             if msg_type == 'FILE_START':
                 self.file_start_received.emit(data)
             elif msg_type == 'FILE_CHUNK':
