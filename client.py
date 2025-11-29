@@ -86,7 +86,7 @@ class ChatClient:
         peer_username = self.gui.current_peer
         success = self.network_manager.send_tcp_message(peer_username, message)
         if success:
-            self.gui.display_message("Me: ", message)
+            self.gui.display_message("Me", message, True)
             self.gui.message_input.clear()
         else:
             self.gui.display_message("System", f"Failed to send message to {peer_username}")

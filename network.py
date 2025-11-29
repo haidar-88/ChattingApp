@@ -121,23 +121,6 @@ class NetworkManager:
             return None, None
         except:
             return "NULLLL"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     
     def connect_to_peer_tcp(self, peer_username):
         """Establish TCP connection to a peer"""
@@ -174,9 +157,15 @@ class NetworkManager:
     
 
 
-    # -------------------------------------------------------------
-    # UDP LISTENER
-    # -------------------------------------------------------------
+
+
+
+
+
+
+
+
+
     def start_udp_listener(self):
         """Start UDP listener with dynamic port if needed"""
         try:
@@ -199,18 +188,45 @@ class NetworkManager:
             return False
 
         peer = self.peer_list[peer_username]
+        ip = peer["ip"]
         udp_port = peer["udp_port"]
 
         file_size = os.path.getsize(file_path)
         file_name = os.path.basename(file_path)
 
-        try:
-            # Send metadata
-            meta = {"type": "FILE_START", "filename": file_name, "size": file_size, "sender": self.username}
-            meta_bytes = json.dumps(meta).encode("utf-8")
-            header = struct.pack("!I", len(meta_bytes))
-            self.udp_listener_socket.sendto(header + meta_bytes, (peer["ip"], udp_port))
+        def wait_for_ack(expected_id, timeout_sec=0.5):
+            """Wait for a specific ACK ID, resend packet if timeout."""
+            self.udp_listener_socket.settimeout(timeout_sec)
+            try:
+                data, _ = self.udp_listener_socket.recvfrom(1024)
+                if data[0] == 4:  # ACK
+                    ack_id = struct.unpack("!I", data[1:5])[0]
+                    return ack_id == expected_id
+                return False
+            except timeout:
+                return False
 
+        try:
+            # -------------------------------------------------------
+            # 1) SEND FILE_START
+            # -------------------------------------------------------
+            start_meta = {
+                "filename": file_name,
+                "size": file_size,
+                "sender": self.username
+            }
+            start_bytes = json.dumps(start_meta).encode("utf-8")
+            packet = b"\x01" + struct.pack("!I", len(start_bytes)) + start_bytes
+
+            reserved_ack = 999999000
+            while True:
+                self.udp_listener_socket.sendto(packet, (ip, udp_port))
+                if wait_for_ack(reserved_ack):
+                    break
+
+            # -------------------------------------------------------
+            # 2) SEND FILE CHUNKS WITH ACKs
+            # -------------------------------------------------------
             chunk_number = 0
             with open(file_path, "rb") as f:
                 while True:
@@ -218,60 +234,108 @@ class NetworkManager:
                     if not chunk:
                         break
 
-                    header = struct.pack("!II", chunk_number, len(chunk))
-                    self.udp_listener_socket.sendto(header + chunk, (peer["ip"], udp_port))
-                    chunk_number += 1
+                    header = b"\x02" + struct.pack("!II", chunk_number, len(chunk))
+                    packet = header + chunk
+
+                    # wait for ACK(chuck_number)
+                    while True:
+                        self.udp_listener_socket.sendto(packet, (ip, udp_port))
+                        if wait_for_ack(chunk_number):
+                            break
 
                     yield chunk_number, len(chunk)
+                    chunk_number += 1
 
-            # End packet
-            end_meta = {"type": "FILE_END", "filename": file_name, "sender": self.username}
+            # -------------------------------------------------------
+            # 3) SEND FILE_END
+            # -------------------------------------------------------
+            end_meta = {
+                "filename": file_name,
+                "sender": self.username
+            }
             end_bytes = json.dumps(end_meta).encode("utf-8")
-            header = struct.pack("!I", len(end_bytes))
-            self.udp_listener_socket.sendto(header + end_bytes, (peer["ip"], udp_port))
+            packet = b"\x03" + struct.pack("!I", len(end_bytes)) + end_bytes
+
+            reserved_ack = 999999001
+            while True:
+                self.udp_listener_socket.sendto(packet, (ip, udp_port))
+                if wait_for_ack(reserved_ack):
+                    break
 
             return True
 
         except Exception as e:
-            print(f"Error sending file via UDP: {e}")
+            print("Error sending file via UDP:", e)
             return False
 
+
+
+
     def receive_udp_message(self):
-        if not self.udp_listener_socket:
-            return None, None, None
-        
         try:
-            data, addr = self.udp_listener_socket.recvfrom(65536)
-            if len(data) < 4:
+            data, addr = self.udp_listener_socket.recvfrom(CHUNK_SIZE + 100)
+            if len(data) < 1:
                 return None, None, None
 
-            # metadata?
-            header_len = struct.unpack("!I", data[:4])[0]
-            if 0 < header_len < len(data):
-                try:
-                    meta = json.loads(data[4:4+header_len].decode("utf-8"))
-                    if meta["type"] in ("FILE_START", "FILE_END"):
-                        return meta["type"], meta, addr
-                except:
-                    pass
+            msg_type = data[0]      # first byte
+            payload = data[1:]
 
-            # chunk
-            if len(data) >= 8:
-                chunk_num = struct.unpack("!I", data[0:4])[0]
-                chunk_len = struct.unpack("!I", data[4:8])[0]
-                return "FILE_CHUNK", (chunk_num, data[8:8+chunk_len]), addr
+            # -------------------------------------------------------
+            # FILE_START
+            # -------------------------------------------------------
+            if msg_type == 1:
+                meta_len = struct.unpack("!I", payload[:4])[0]
+                meta = json.loads(payload[4:4+meta_len].decode("utf-8"))
+
+                # SEND ACK
+                ack_packet = b"\x04" + struct.pack("!I", 999999000)
+                self.udp_listener_socket.sendto(ack_packet, addr)
+
+                return "FILE_START", meta, addr
+
+            # -------------------------------------------------------
+            # FILE_CHUNK
+            # -------------------------------------------------------
+            if msg_type == 2:
+                chunk_num, chunk_len = struct.unpack("!II", payload[:8])
+                chunk_data = payload[8:8+chunk_len]
+
+                # SEND ACK(chunk_num)
+                ack_packet = b"\x04" + struct.pack("!I", chunk_num)
+                self.udp_listener_socket.sendto(ack_packet, addr)
+
+                return "FILE_CHUNK", (chunk_num, chunk_len, chunk_data), addr
+
+            # -------------------------------------------------------
+            # FILE_END
+            # -------------------------------------------------------
+            if msg_type == 3:
+                meta_len = struct.unpack("!I", payload[:4])[0]
+                meta = json.loads(payload[4:4+meta_len].decode("utf-8"))
+
+                # SEND ACK
+                ack_packet = b"\x04" + struct.pack("!I", 999999001)
+                self.udp_listener_socket.sendto(ack_packet, addr)
+
+                return "FILE_END", meta, addr
+
+            # -------------------------------------------------------
+            # ACK
+            # -------------------------------------------------------
+            if msg_type == 4:
+                ack_id = struct.unpack("!I", payload[:4])[0]
+                return "ACK", ack_id, addr
 
             return None, None, None
 
         except timeout:
             return None, None, None
         except Exception as e:
-            print(f"Error receiving UDP message: {e}")
+            print("Error receiving UDP message:", e)
             return None, None, None
 
-    # -------------------------------------------------------------
-    # CLOSE ALL
-    # -------------------------------------------------------------
+
+
     def close_all(self):
         self.running = False
         
