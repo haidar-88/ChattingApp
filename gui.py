@@ -4,6 +4,8 @@ from PyQt5.QtWidgets import (
     QLineEdit, QPushButton, QFileDialog, QScrollArea, QSizePolicy
 )
 from PyQt5.QtCore import Qt
+import os
+from network import CHUNK_SIZE
 
 class ChatWindow(QMainWindow):
     def __init__(self, network_manager):
@@ -164,18 +166,73 @@ class ChatWindow(QMainWindow):
         self.file_transfer_received = 0
         self.incoming_file_name = metadata["filename"]
         self.incoming_file_buffer = bytearray()
-        self.file_progress_label.setText(f"Receiving: {self.incoming_file_name} 0%")
+        partial_dir = "received_files"
+        os.makedirs(partial_dir, exist_ok=True)
+        self.incoming_file_path = os.path.join(partial_dir, self.incoming_file_name + ".part")
+        # Load existing partial file if exists
+        if os.path.exists(self.incoming_file_path):
+            self.incoming_file_buffer = bytearray(open(self.incoming_file_path, "rb").read())
+        else:
+            self.incoming_file_buffer = bytearray()
+        self.file_transfer_received = len(self.incoming_file_buffer)
+        ##self.file_progress_label.setText(f"Receiving: {self.incoming_file_name} 0%")
+        percent = int((self.file_transfer_received / self.file_transfer_total) * 100) if self.file_transfer_total else 0
+        self.file_progress_label.setText(f"Receiving: {self.incoming_file_name} {percent}%")
+
+        # Notify sender of current received bytes for resuming
+        if addr:  # addr is the UDP sender's address
+            resume_msg = {
+                "filename": self.incoming_file_name,
+                "received": self.file_transfer_received
+            }
+            resume_bytes = json.dumps(resume_msg).encode('utf-8')
+            #packet = b"\x05" + struct.pack("!I", len(json.dumps(resume_msg))) + json.dumps(resume_msg).encode()
+            packet = b"\x05" + struct.pack("!I", len(resume_bytes)) + resume_bytes
+            self.network_manager.udp_listener_socket.sendto(packet, addr)
 
     def handle_file_chunk(self, chunk_info, addr=None):
         chunk_num, chunk_len, chunk_bytes = chunk_info
-        self.incoming_file_buffer.extend(chunk_bytes)
-        self.file_transfer_received += chunk_len
+        #self.incoming_file_buffer.extend(chunk_bytes)
+        #self.file_transfer_received += chunk_len
+        ## The above are not needed
+        
+        # Calculate overlap with already received data
+        start_pos = chunk_num * CHUNK_SIZE
+        end_pos = start_pos + chunk_len
+        
+        # Only add new bytes if beyond current buffer length
+        if start_pos >= len(self.incoming_file_buffer):
+            self.incoming_file_buffer.extend(chunk_bytes)
+            self.file_transfer_received += chunk_len
+        else:
+            # Partial overlap: add only the missing part
+            overlap = len(self.incoming_file_buffer) - start_pos
+            if overlap < chunk_len:
+                self.incoming_file_buffer.extend(chunk_bytes[overlap:])
+                self.file_transfer_received += (chunk_len - overlap)
+
+        # Save progress to partial file
+        with open(self.incoming_file_path, "wb") as f:
+            f.write(self.incoming_file_buffer)
+        
         percent = int((self.file_transfer_received / self.file_transfer_total) * 100) if self.file_transfer_total else 0
         self.file_progress_label.setText(f"Receiving: {self.incoming_file_name} {percent}%")
 
     def handle_file_end(self, metadata, addr=None):
         sender_username = metadata.get("sender", self.current_peer)
         self.file_progress_label.setText("")
+        #self.add_clickable_file_message(self.incoming_file_name, self.incoming_file_buffer)
+        
+        # Write final file
+        final_path = os.path.join("received_files", self.incoming_file_name)
+        with open(final_path, "wb") as f:
+            f.write(self.incoming_file_buffer)
+
+        # Remove .part file
+        if os.path.exists(self.incoming_file_path):
+            os.remove(self.incoming_file_path)
+
+        # Show clickable in chat
         self.add_clickable_file_message(self.incoming_file_name, self.incoming_file_buffer)
         self.incoming_file_buffer = None
         self.incoming_file_name = None

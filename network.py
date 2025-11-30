@@ -148,6 +148,57 @@ class NetworkManager:
         try:
             data = peer_socket.recv(8192)
             if not data:
+                # Peer closed the connection
+                return None, None, True
+
+            message = data.decode()
+            print(message)
+
+            # If AES_KEY, save it with a temporary key
+            if message.startswith("AES_KEY:"):
+                encrypted_key_b64 = message[len("AES_KEY:"):]
+                encrypted_bytes = base64.b64decode(encrypted_key_b64)
+                aes_key = rsa.decrypt(encrypted_bytes, self.private_key)
+                print('AES Key decrypted:', aes_key)
+
+                temp_key = id(peer_socket)
+                self.peer_aes_keys[temp_key] = aes_key
+                print('Saved AES key temporarily:', self.peer_aes_keys)
+                return None, None, False
+
+            print('Before Splitting and Decrypting: ', message)
+            # For normal messages
+            if "|" in message:
+                peer_username, enc_bytes = message.split("|", 1)
+                if peer_username not in self.active_peer_connections:
+                    self.active_peer_connections[peer_username] = peer_socket
+
+                # Move temporary AES key to real username
+                temp_key = id(peer_socket)
+                if temp_key in self.peer_aes_keys:
+                    self.peer_aes_keys[peer_username] = self.peer_aes_keys.pop(temp_key)
+
+                if peer_username in self.peer_aes_keys:
+                    encrypted_bytes = base64.b64decode(enc_bytes)
+                    plaintext = aes_decrypt(self.peer_aes_keys[peer_username], encrypted_bytes)
+                    return peer_username, plaintext.decode(), False
+                else:
+                    return None, "[Encrypted message, AES key not established]", False
+
+            return None, None, False
+
+        except (ConnectionResetError, ConnectionAbortedError):
+            # Peer forcibly closed connection
+            return None, None, True
+        except timeout:
+            return None, None, False
+        except Exception as e:
+            print(f"Error decrypting TCP message: {e}")
+            return None, None, False
+        
+        """try:
+            data = peer_socket.recv(8192)
+            if not data:
                 return ""
 
             message = data.decode()
@@ -190,7 +241,7 @@ class NetworkManager:
             return (None, None)
         except Exception as e:
             print(f"Error decrypting TCP message: {e}")
-            return (None, None)
+            return (None, None)"""
 
     def send_tcp_message(self, peer_username, message):
         sock = self.connect_to_peer_tcp(peer_username)
@@ -266,17 +317,30 @@ class NetworkManager:
             start_bytes = json.dumps(start_meta).encode("utf-8")
             packet = b"\x01" + struct.pack("!I", len(start_bytes)) + start_bytes
 
+            self.udp_listener_socket.sendto(packet, (ip, udp_port))
+
+            # Wait briefly for FILE_RESUME
+            resume_offset = 0
+            start_time = time.time()
+            while time.time() - start_time < 1.0:  # 1 second max wait
+                msg_type, data = self.receive_udp_message()[:2]
+                if msg_type == "FILE_RESUME" and data["filename"] == file_name:
+                    resume_offset = data["received"]
+                    break
+            """
             reserved_ack = 999999000
             while True:
                 self.udp_listener_socket.sendto(packet, (ip, udp_port))
                 if wait_for_ack(reserved_ack):
                     break
-
+            """
             # -------------------------------------------------------
             # 2) SEND FILE CHUNKS WITH ACKs
             # -------------------------------------------------------
-            chunk_number = 0
+            chunk_number = resume_offset // CHUNK_SIZE
             with open(file_path, "rb") as f:
+                # Move file pointer to resume position
+                f.seek(resume_offset)
                 while True:
                     chunk = f.read(CHUNK_SIZE)
                     if not chunk:
@@ -335,7 +399,33 @@ class NetworkManager:
                 # SEND ACK
                 ack_packet = b"\x04" + struct.pack("!I", 999999000)
                 self.udp_listener_socket.sendto(ack_packet, addr)
+                
+                ####  This part is for the bonus (2)  #####
+                # ===== RESUME SUPPORT =====
+                filename = meta["filename"]
+                sender_name = meta["sender"]
+                partial_dir = "received_files"
+                os.makedirs(partial_dir, exist_ok=True)
 
+                partial_path = os.path.join(partial_dir, filename + ".part")
+
+                # Determine how many bytes are already downloaded
+                received_bytes = 0
+                if os.path.exists(partial_path):
+                    received_bytes = os.path.getsize(partial_path)
+
+                # Send FILE_RESUME response (type 5)
+                resume_info = {
+                    "filename": filename,
+                    "received": received_bytes,
+                    "sender": sender_name
+                }
+                resume_bytes = json.dumps(resume_info).encode("utf-8")
+                resume_packet = b"\x05" + struct.pack("!I", len(resume_bytes)) + resume_bytes
+                self.udp_listener_socket.sendto(resume_packet, addr)
+
+                meta["resume_bytes"] = received_bytes
+                
                 return "FILE_START", meta
 
             # -------------------------------------------------------
@@ -363,7 +453,15 @@ class NetworkManager:
                 self.udp_listener_socket.sendto(ack_packet, addr)
 
                 return "FILE_END", meta
-
+            
+            # -------------------------------------------------------
+            # FILE_RESUME (Receiver tells sender how many bytes exist)
+            # -------------------------------------------------------
+            if msg_type == 5:
+                meta_len = struct.unpack("!I", payload[:4])[0]
+                meta = json.loads(payload[4:4+meta_len].decode("utf-8"))
+                return "FILE_RESUME", meta
+            
             # -------------------------------------------------------
             # ACK
             # -------------------------------------------------------

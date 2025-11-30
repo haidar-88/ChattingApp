@@ -63,11 +63,34 @@ class TCPListenerThread(QThread):
                 
     def handle_peer(self, client_socket, addr):
         while self.running:
-            peer_username, message = self.network_manager.receive_tcp_message(client_socket)
+            peer_username, message, disconnected = self.network_manager.receive_tcp_message(client_socket)
+
+            if disconnected:
+                # Peer closed connection
+                print(f"[TCP] Peer disconnected: {peer_username or addr}")
+                if peer_username:
+                    self.connection_closed.emit(peer_username)
+                break
+
+            if not message or not peer_username:
+                continue
+
+            if peer_username not in self.network_manager.active_peer_connections:
+                self.network_manager.active_peer_connections[peer_username] = client_socket
+
+            # Emit message to GUI
+            self.message_received.emit(peer_username, message)
+
+        # Clean up socket
+        try:
+            client_socket.close()
+        except:
+            pass
+            """peer_username, message = self.network_manager.receive_tcp_message(client_socket)
             if message is None:
                 continue
             message = message.strip()
-            self.message_received.emit(peer_username, message)
+            self.message_received.emit(peer_username, message)"""
 
     
     def stop(self):
