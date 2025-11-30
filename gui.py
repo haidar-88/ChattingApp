@@ -11,7 +11,7 @@ class ChatWindow(QMainWindow):
     def __init__(self, network_manager):
         super().__init__()
         self.network_manager = network_manager
-        self.setWindowTitle(f"XChat | Username: {self.network_manager.username}")
+        self.setWindowTitle(f"ChatX Application | Username: {self.network_manager.username}")
         self.setGeometry(100, 100, 700, 500)
 
         self.current_peer = None
@@ -20,8 +20,9 @@ class ChatWindow(QMainWindow):
 
         self.incoming_file_name = None
         self.incoming_file_buffer = None
+        self.file_transfer_done = False
 
-        self.chat_history = {}
+        self.chat_history = {}  # Stores both text and files per peer
 
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -94,10 +95,9 @@ class ChatWindow(QMainWindow):
 
     # ======================== Chat Display ========================
     def display_message(self, username, message, outgoing=False):
-        if username not in self.chat_history and username!='Me':
-            self.chat_history[username] = []
-        if username!='Me':
-            self.chat_history[username].append((username, message, outgoing))
+        # Store text messages in history
+        if self.current_peer and {"type": "text", "content": message, "outgoing": outgoing} not in self.chat_history[self.current_peer]:
+            self.chat_history[self.current_peer].append({"type": "text", "content": message, "outgoing": outgoing})
 
         # Bubble style
         bubble = QLabel(message)
@@ -119,10 +119,6 @@ class ChatWindow(QMainWindow):
 
         # Add username for incoming messages
         container = QVBoxLayout()
-        if not outgoing:
-            user_label = QLabel(username)
-            user_label.setStyleSheet("font-weight: bold; font-size: 12px; color:#555;")
-            container.addWidget(user_label)
         container.addWidget(bubble)
         container_widget = QWidget()
         container_widget.setLayout(container)
@@ -142,14 +138,22 @@ class ChatWindow(QMainWindow):
         self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().maximum())
 
     def update_chat_display(self):
+        # Clear current chat area
         for i in reversed(range(self.chat_area_layout.count())):
             widget = self.chat_area_layout.itemAt(i).widget()
             if widget:
                 widget.setParent(None)
+
         if not self.current_peer:
             return
-        for username, message, outgoing in self.chat_history.get(self.current_peer, []):
-            self.display_message(username, message, outgoing=outgoing)
+
+        # Render chat history (text + files)
+        for item in self.chat_history.get(self.current_peer, []):
+            if item["type"] == "text":
+                self.display_message(self.current_peer, item["content"], outgoing=item["outgoing"])
+            elif item["type"] == "file":
+                # Only add clickable file once
+                self.add_clickable_file_message(item["filename"], item["data"], outgoing=item["outgoing"], add_to_history=False)
 
     # ======================== File Transfer ========================
     def select_and_send_file(self):
@@ -160,6 +164,10 @@ class ChatWindow(QMainWindow):
             for chunk_number, chunk_size in self.network_manager.send_file_udp(self.current_peer, file_path):
                 self.file_progress_label.setText(f"Sent chunk {chunk_number}, size {chunk_size} bytes")
             self.file_progress_label.setText("")
+
+            with open(file_path, "rb") as f:
+                file_bytes = f.read()
+            self.add_clickable_file_message(os.path.basename(file_path), file_bytes, outgoing=True)
 
     def handle_file_start(self, metadata, addr=None):
         self.file_transfer_total = metadata.get("size", 0)
@@ -239,19 +247,39 @@ class ChatWindow(QMainWindow):
         self.file_transfer_total = 0
         self.file_transfer_received = 0
 
-    def add_clickable_file_message(self, file_name, file_bytes):
+    def add_clickable_file_message(self, file_name, file_bytes, outgoing=False, add_to_history=True):
+        if add_to_history and self.current_peer:
+            if self.current_peer not in self.chat_history:
+                self.chat_history[self.current_peer] = []
+            # Avoid duplicates
+            if {"type": "file", "filename": file_name, "data": file_bytes, "outgoing": outgoing} not in self.chat_history[self.current_peer]:
+                self.chat_history[self.current_peer].append({
+                    "type": "file",
+                    "filename": file_name,
+                    "data": file_bytes,
+                    "outgoing": outgoing
+                })
+
         btn = QPushButton(f"📎 {file_name}")
         btn.setStyleSheet(
             "text-align:left; background:#e0e0ff; padding:8px; border-radius:12px; font-size:14px;"
         )
         btn.clicked.connect(lambda: self.save_received_file(file_name, file_bytes))
+
         align_layout = QHBoxLayout()
-        align_layout.addWidget(btn)
-        align_layout.addStretch()
+        if outgoing:
+            align_layout.addStretch()
+            align_layout.addWidget(btn)
+        else:
+            align_layout.addWidget(btn)
+            align_layout.addStretch()
+
         container = QWidget()
         container.setLayout(align_layout)
         self.chat_area_layout.addWidget(container)
-        self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().maximum())
+        self.scroll_area.verticalScrollBar().setValue(
+            self.scroll_area.verticalScrollBar().maximum()
+        )
 
     def save_received_file(self, file_name, file_bytes):
         save_path, _ = QFileDialog.getSaveFileName(self, "Save File", file_name)
