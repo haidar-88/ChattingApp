@@ -19,15 +19,15 @@ class ChatClient:
     def __init__(self):
         self.app = QApplication(sys.argv)
 
-        self.username, ok = QInputDialog.getText(
+        username, ok = QInputDialog.getText(
             None, 'Username', 'Enter your username:'
         )
 
-        if not ok or not self.username.strip():
-            self.username = 'User' + random.randint(1,1000)
+        if not ok or not username.strip():
+            username = 'User' + random.randint(1,1000)
 
-        priv_path = f"keys\\{self.username}_private.pem"
-        pub_path = f"keys\\{self.username}_public.pem"
+        priv_path = f"keys\\{username}_private.pem"
+        pub_path = f"keys\\{username}_public.pem"
 
         # Load if exists, else generate
         if os.path.exists(priv_path) and os.path.exists(pub_path):
@@ -38,11 +38,9 @@ class ChatClient:
             save_private_key(priv_path, private_key)
             save_public_key(pub_path, public_key)
 
-        self.active_file_transfers = []
-
         # Initialize network manager
         self.network_manager = NetworkManager(
-            username=self.username.strip(),
+            username=username.strip(),
             private_key=private_key,
             public_key=public_key
         )
@@ -106,9 +104,8 @@ class ChatClient:
 
         peer_username = self.gui.current_peer
         success = self.network_manager.send_tcp_message(peer_username, message)
-        self.network_manager.signal_communication('MESSAGESENT', self.username, peer_username)
         if success:
-            self.gui.display_message(self.network_manager.username, message, True)
+            self.gui.display_message("Me", message, True)
             self.gui.message_input.clear()
         else:
             self.gui.display_message("System", f"Failed to send message to {peer_username}")
@@ -119,36 +116,31 @@ class ChatClient:
         if not self.gui.current_peer:
             QMessageBox.warning(self.gui, "Error", "Please select a peer first.")
             return
-        
+
         from PyQt5.QtWidgets import QFileDialog
         file_path, _ = QFileDialog.getOpenFileName(
             self.gui, "Select File to Send", "", "All Files (*)"
         )
-    
+
+        if not file_path:
+            return
+
         peer_username = self.gui.current_peer
-        self.network_manager.signal_communication('FILESENT', self.username, peer_username)
-        
         if peer_username not in self.network_manager.peer_list:
             QMessageBox.warning(self.gui, "Error", "Peer not found in peer list.")
             return
-        
+
         # Start file transfer in a separate thread
         transfer_thread = FileTransferThread(self.network_manager, peer_username, file_path)
         transfer_thread.transfer_progress.connect(self.update_file_progress)
-        def on_transfer_complete():
-            self.file_transfer_complete()
-            if transfer_thread in self.active_file_transfers:
-                self.active_file_transfers.remove(transfer_thread)
-        
-        transfer_thread.transfer_complete.connect(on_transfer_complete)
-        
-        self.active_file_transfers.append(transfer_thread)
+        transfer_thread.transfer_complete.connect(self.file_transfer_complete)
         transfer_thread.start()
 
     def update_file_progress(self, chunk_number, chunk_size):
         self.gui.file_progress_label.setText(f"Sent chunk {chunk_number}, size {chunk_size} bytes")
 
     def file_transfer_complete(self):
+        self.gui.chat_display.append("File transfer completed")
         self.gui.file_progress_label.setText("")
 
     # ------------------- Peer Disconnect -------------------
