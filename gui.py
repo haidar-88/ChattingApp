@@ -172,13 +172,50 @@ class ChatWindow(QMainWindow):
     def handle_file_start(self, metadata, addr=None):
         print("DEBUG handle_file_start called:", metadata)
         self.file_transfer_done = False
-        self.incoming_file_name = metadata.get("filename")
-        self.file_transfer_total = metadata.get("file_size", 0)
+        #self.incoming_file_name = metadata.get("filename")
+        self.file_transfer_total = metadata.get("size", 0)
         self.file_transfer_received = 0
+        self.incoming_file_name = metadata["filename"]
 
-        os.makedirs("received_files", exist_ok=True)
-        self.incoming_file_path = os.path.join("received_files", self.incoming_file_name + ".part")
+        #os.makedirs("received_files", exist_ok=True)
+        #self.incoming_file_path = os.path.join("received_files", self.incoming_file_name + ".part")
         self.incoming_file_buffer = bytearray()
+        partial_dir = "received_files"
+        os.makedirs(partial_dir, exist_ok=True)
+        self.incoming_file_path = os.path.join(partial_dir, self.incoming_file_name + ".part")
+
+        ### 
+        self.received_chunks = set()
+        progress_path = self.incoming_file_path + ".progress"
+        if os.path.exists(progress_path):
+            with open(progress_path, "r") as f:
+                self.received_chunks = set(map(int, f.read().split(',')))
+        ###
+
+        # Load existing partial file if exists
+        if os.path.exists(self.incoming_file_path):
+            self.incoming_file_buffer = bytearray(open(self.incoming_file_path, "rb").read())
+        else:
+            self.incoming_file_buffer = bytearray()
+        #self.file_transfer_received = len(self.incoming_file_buffer)
+        ######self.file_progress_label.setText(f"Receiving: {self.incoming_file_name} 0%")
+        #percent = int((self.file_transfer_received / self.file_transfer_total) * 100) if self.file_transfer_total else 0
+        #self.file_progress_label.setText(f"Receiving: {self.incoming_file_name} {percent}%")
+        total_chunks = (self.file_transfer_total + CHUNK_SIZE - 1) // CHUNK_SIZE
+        percent = int((len(self.received_chunks) / total_chunks) * 100) if self.file_transfer_total else 0
+        self.file_progress_label.setText(f"Receiving: {self.incoming_file_name} {percent}%")
+
+        # Notify sender of current received bytes for resuming
+        if addr:  # addr is the UDP sender's address
+            resume_msg = {
+                "filename": self.incoming_file_name,
+                #"received": self.
+                "received_chunks": list(self.received_chunks)
+            }
+            resume_bytes = json.dumps(resume_msg).encode('utf-8')
+            #packet = b"\x05" + struct.pack("!I", len(json.dumps(resume_msg))) + json.dumps(resume_msg).encode()
+            packet = b"\x05" + struct.pack("!I", len(resume_bytes)) + resume_bytes
+            self.network_manager.udp_listener_socket.sendto(packet, addr)
 
         print(f"Started receiving file: {self.incoming_file_name}, size: {self.file_transfer_total}")
 
@@ -199,8 +236,25 @@ class ChatWindow(QMainWindow):
         with open(self.incoming_file_path, "wb") as f:
             f.write(self.incoming_file_buffer)
 
-        percent = int((self.file_transfer_received / self.file_transfer_total) * 100) if self.file_transfer_total else 0
+        print("CHUNK:", chunk_num)
+        print("Received so far:", self.file_transfer_received)
+        print("Total size:", self.file_transfer_total)
+        
+        ###
+        self.received_chunks.add(chunk_num)
+
+        # Update progress bar
+        total_chunks = (self.file_transfer_total + CHUNK_SIZE - 1) // CHUNK_SIZE
+        percent = int((len(self.received_chunks) / total_chunks) * 100)
         self.file_progress_label.setText(f"Receiving: {self.incoming_file_name} {percent}%")
+
+        # Save progress to disk for resuming
+        progress_path = self.incoming_file_path + ".progress"
+        with open(progress_path, "w") as pf:
+            pf.write(','.join(map(str, self.received_chunks))) 
+        ###
+        #percent = int((self.file_transfer_received / self.file_transfer_total) * 100) if self.file_transfer_total else 0
+        #self.file_progress_label.setText(f"Receiving: {self.incoming_file_name} {percent}%")
 
     def handle_file_end(self, metadata, addr=None):
         print("DEBUG handle_file_end called. metadata:", metadata, "current incoming_file_name:", self.incoming_file_name)

@@ -280,12 +280,14 @@ class NetworkManager:
             self.udp_listener_socket.sendto(packet, (ip, udp_port))
 
             # Wait briefly for FILE_RESUME
-            resume_offset = 0
+            #resume_offset = 0
+            received_chunks = set()
             start_time = time.time()
             while time.time() - start_time < 1.0:  # 1 second max wait
                 msg_type, data = self.receive_udp_message()[:2]
                 if msg_type == "FILE_RESUME" and data["filename"] == file_name:
-                    resume_offset = data["received"]
+                    #resume_offset = data["received"]
+                    received_chunks = set(data.get("received_chunks", []))
                     break
             """
             reserved_ack = 999999000
@@ -297,7 +299,29 @@ class NetworkManager:
             # -------------------------------------------------------
             # 2) SEND FILE CHUNKS WITH ACKs
             # -------------------------------------------------------
-            chunk_number = resume_offset // CHUNK_SIZE
+
+            total_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+            with open(file_path, "rb") as f:
+                for chunk_number in range(total_chunks):
+                    if chunk_number in received_chunks:
+                        # skip already received chunk
+                        f.seek(CHUNK_SIZE, 1)  # move file pointer forward
+                        continue
+
+                    chunk = f.read(CHUNK_SIZE)
+                    header = b"\x02" + struct.pack("!II", chunk_number, len(chunk))
+                    packet = header + chunk
+
+                    # wait for ACK(chunk_number)
+                    while True:
+                        self.udp_listener_socket.sendto(packet, (ip, udp_port))
+                        if wait_for_ack(chunk_number):
+                            break
+
+                    yield chunk_number, len(chunk)
+
+
+            """chunk_number = resume_offset // CHUNK_SIZE
             with open(file_path, "rb") as f:
                 # Move file pointer to resume position
                 f.seek(resume_offset)
@@ -316,7 +340,7 @@ class NetworkManager:
                             break
 
                     yield chunk_number, len(chunk)
-                    chunk_number += 1
+                    chunk_number += 1"""
 
             # -------------------------------------------------------
             # 3) SEND FILE_END
@@ -369,15 +393,23 @@ class NetworkManager:
 
                 partial_path = os.path.join(partial_dir, filename + ".part")
 
+                progress_path = partial_path + ".progress"
                 # Determine how many bytes are already downloaded
                 received_bytes = 0
                 if os.path.exists(partial_path):
                     received_bytes = os.path.getsize(partial_path)
 
+                # Load received chunks if exists
+                received_chunks = set()
+                if os.path.exists(progress_path):
+                    with open(progress_path, "r") as f:
+                        received_chunks = set(map(int, f.read().split(',')))
+
                 # Send FILE_RESUME response (type 5)
                 resume_info = {
                     "filename": filename,
-                    "received": received_bytes,
+                    #"received": received_bytes,
+                    "received_chunks": list(received_chunks),
                     "sender": sender_name
                 }
                 resume_bytes = json.dumps(resume_info).encode("utf-8")
@@ -394,6 +426,24 @@ class NetworkManager:
             if msg_type == 2:
                 chunk_num, chunk_len = struct.unpack("!II", payload[:8])
                 chunk_data = payload[8:8+chunk_len]
+
+                # Save chunk to file (append in correct position)
+                filename = getattr(self, "current_file_name", None)
+                if filename:
+                    partial_path = os.path.join("received_files", filename + ".part")
+                    with open(partial_path, "r+b" if os.path.exists(partial_path) else "wb") as f:
+                        f.seek(chunk_num * CHUNK_SIZE)
+                        f.write(chunk_data)
+
+                    # Update progress
+                    progress_path = partial_path + ".progress"
+                    received_chunks = set()
+                    if os.path.exists(progress_path):
+                        with open(progress_path, "r") as pf:
+                            received_chunks = set(map(int, pf.read().split(',')))
+                    received_chunks.add(chunk_num)
+                    with open(progress_path, "w") as pf:
+                        pf.write(','.join(map(str, received_chunks)))
 
                 # SEND ACK(chunk_num)
                 ack_packet = b"\x04" + struct.pack("!I", chunk_num)
