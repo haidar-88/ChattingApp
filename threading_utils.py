@@ -33,7 +33,7 @@ class ServerCommunicationThread(QThread):
                     heartbeat_timer = 0
                 self.server_connection_status.emit(connected)
             heartbeat_timer += 2
-    
+
     def stop(self):
         self.server_connection_status.emit(False)
         self.running = False
@@ -86,13 +86,7 @@ class TCPListenerThread(QThread):
             client_socket.close()
         except:
             pass
-            """peer_username, message = self.network_manager.receive_tcp_message(client_socket)
-            if message is None:
-                continue
-            message = message.strip()
-            self.message_received.emit(peer_username, message)"""
 
-    
     def stop(self):
         self.running = False
 

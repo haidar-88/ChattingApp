@@ -11,7 +11,7 @@ class ChatWindow(QMainWindow):
     def __init__(self, network_manager):
         super().__init__()
         self.network_manager = network_manager
-        self.setWindowTitle(f"XChat | Username: {self.network_manager.username}")
+        self.setWindowTitle(f"ChatX Application | Username: {self.network_manager.username}")
         self.setGeometry(100, 100, 700, 500)
 
         self.current_peer = None
@@ -20,8 +20,9 @@ class ChatWindow(QMainWindow):
 
         self.incoming_file_name = None
         self.incoming_file_buffer = None
+        self.file_transfer_done = False
 
-        self.chat_history = {}
+        self.chat_history = {}  # Stores both text and files per peer
 
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -94,10 +95,9 @@ class ChatWindow(QMainWindow):
 
     # ======================== Chat Display ========================
     def display_message(self, username, message, outgoing=False):
-        if username not in self.chat_history and username!='Me':
-            self.chat_history[username] = []
-        if username!='Me':
-            self.chat_history[username].append((username, message, outgoing))
+        # Store text messages in history
+        if self.current_peer and {"type": "text", "content": message, "outgoing": outgoing} not in self.chat_history[self.current_peer]:
+            self.chat_history[self.current_peer].append({"type": "text", "content": message, "outgoing": outgoing})
 
         # Bubble style
         bubble = QLabel(message)
@@ -119,10 +119,6 @@ class ChatWindow(QMainWindow):
 
         # Add username for incoming messages
         container = QVBoxLayout()
-        if not outgoing:
-            user_label = QLabel(username)
-            user_label.setStyleSheet("font-weight: bold; font-size: 12px; color:#555;")
-            container.addWidget(user_label)
         container.addWidget(bubble)
         container_widget = QWidget()
         container_widget.setLayout(container)
@@ -142,14 +138,22 @@ class ChatWindow(QMainWindow):
         self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().maximum())
 
     def update_chat_display(self):
+        # Clear current chat area
         for i in reversed(range(self.chat_area_layout.count())):
             widget = self.chat_area_layout.itemAt(i).widget()
             if widget:
                 widget.setParent(None)
+
         if not self.current_peer:
             return
-        for username, message, outgoing in self.chat_history.get(self.current_peer, []):
-            self.display_message(username, message, outgoing=outgoing)
+
+        # Render chat history (text + files)
+        for item in self.chat_history.get(self.current_peer, []):
+            if item["type"] == "text":
+                self.display_message(self.current_peer, item["content"], outgoing=item["outgoing"])
+            elif item["type"] == "file":
+                # Only add clickable file once
+                self.add_clickable_file_message(item["filename"], item["data"], outgoing=item["outgoing"], add_to_history=False)
 
     # ======================== File Transfer ========================
     def select_and_send_file(self):
@@ -161,97 +165,108 @@ class ChatWindow(QMainWindow):
                 self.file_progress_label.setText(f"Sent chunk {chunk_number}, size {chunk_size} bytes")
             self.file_progress_label.setText("")
 
-    def handle_file_start(self, metadata, addr=None):
-        self.file_transfer_total = metadata.get("size", 0)
-        self.file_transfer_received = 0
-        self.incoming_file_name = metadata["filename"]
-        self.incoming_file_buffer = bytearray()
-        partial_dir = "received_files"
-        os.makedirs(partial_dir, exist_ok=True)
-        self.incoming_file_path = os.path.join(partial_dir, self.incoming_file_name + ".part")
-        # Load existing partial file if exists
-        if os.path.exists(self.incoming_file_path):
-            self.incoming_file_buffer = bytearray(open(self.incoming_file_path, "rb").read())
-        else:
-            self.incoming_file_buffer = bytearray()
-        self.file_transfer_received = len(self.incoming_file_buffer)
-        ##self.file_progress_label.setText(f"Receiving: {self.incoming_file_name} 0%")
-        percent = int((self.file_transfer_received / self.file_transfer_total) * 100) if self.file_transfer_total else 0
-        self.file_progress_label.setText(f"Receiving: {self.incoming_file_name} {percent}%")
+            with open(file_path, "rb") as f:
+                file_bytes = f.read()
+            self.add_clickable_file_message(os.path.basename(file_path), file_bytes, outgoing=True)
 
-        # Notify sender of current received bytes for resuming
-        if addr:  # addr is the UDP sender's address
-            resume_msg = {
-                "filename": self.incoming_file_name,
-                "received": self.file_transfer_received
-            }
-            resume_bytes = json.dumps(resume_msg).encode('utf-8')
-            #packet = b"\x05" + struct.pack("!I", len(json.dumps(resume_msg))) + json.dumps(resume_msg).encode()
-            packet = b"\x05" + struct.pack("!I", len(resume_bytes)) + resume_bytes
-            self.network_manager.udp_listener_socket.sendto(packet, addr)
+    def handle_file_start(self, metadata, addr=None):
+        print("DEBUG handle_file_start called:", metadata)
+        self.file_transfer_done = False
+        self.incoming_file_name = metadata.get("filename")
+        self.file_transfer_total = metadata.get("file_size", 0)
+        self.file_transfer_received = 0
+
+        os.makedirs("received_files", exist_ok=True)
+        self.incoming_file_path = os.path.join("received_files", self.incoming_file_name + ".part")
+        self.incoming_file_buffer = bytearray()
+
+        print(f"Started receiving file: {self.incoming_file_name}, size: {self.file_transfer_total}")
 
     def handle_file_chunk(self, chunk_info, addr=None):
         chunk_num, chunk_len, chunk_bytes = chunk_info
-        #self.incoming_file_buffer.extend(chunk_bytes)
-        #self.file_transfer_received += chunk_len
-        ## The above are not needed
-        
-        # Calculate overlap with already received data
         start_pos = chunk_num * CHUNK_SIZE
         end_pos = start_pos + chunk_len
-        
-        # Only add new bytes if beyond current buffer length
+
         if start_pos >= len(self.incoming_file_buffer):
             self.incoming_file_buffer.extend(chunk_bytes)
             self.file_transfer_received += chunk_len
         else:
-            # Partial overlap: add only the missing part
             overlap = len(self.incoming_file_buffer) - start_pos
             if overlap < chunk_len:
                 self.incoming_file_buffer.extend(chunk_bytes[overlap:])
                 self.file_transfer_received += (chunk_len - overlap)
 
-        # Save progress to partial file
         with open(self.incoming_file_path, "wb") as f:
             f.write(self.incoming_file_buffer)
-        
+
         percent = int((self.file_transfer_received / self.file_transfer_total) * 100) if self.file_transfer_total else 0
         self.file_progress_label.setText(f"Receiving: {self.incoming_file_name} {percent}%")
 
     def handle_file_end(self, metadata, addr=None):
-        sender_username = metadata.get("sender", self.current_peer)
-        self.file_progress_label.setText("")
-        #self.add_clickable_file_message(self.incoming_file_name, self.incoming_file_buffer)
-        
-        # Write final file
-        final_path = os.path.join("received_files", self.incoming_file_name)
+        print("DEBUG handle_file_end called. metadata:", metadata, "current incoming_file_name:", self.incoming_file_name)
+        if self.file_transfer_done:
+            print("IGNORED duplicate FILE_END")
+            return
+        self.file_transfer_done = True
+
+        final_filename = metadata.get("filename") or self.incoming_file_name
+        if not final_filename:
+            print("ERROR: No filename for FILE_END")
+            return
+
+        final_dir = "received_files"
+        os.makedirs(final_dir, exist_ok=True)
+        final_path = os.path.join(final_dir, final_filename)
+
         with open(final_path, "wb") as f:
             f.write(self.incoming_file_buffer)
 
-        # Remove .part file
-        if os.path.exists(self.incoming_file_path):
+        print(f"File saved: {final_path}")
+
+        if self.incoming_file_path and os.path.exists(self.incoming_file_path):
             os.remove(self.incoming_file_path)
 
-        # Show clickable in chat
-        self.add_clickable_file_message(self.incoming_file_name, self.incoming_file_buffer)
+        self.add_clickable_file_message(final_filename, self.incoming_file_buffer, outgoing=False)
         self.incoming_file_buffer = None
         self.incoming_file_name = None
+        self.incoming_file_path = None
         self.file_transfer_total = 0
         self.file_transfer_received = 0
+        self.file_progress_label.setText("")
 
-    def add_clickable_file_message(self, file_name, file_bytes):
+    def add_clickable_file_message(self, file_name, file_bytes, outgoing=False, add_to_history=True):
+        if add_to_history and self.current_peer:
+            if self.current_peer not in self.chat_history:
+                self.chat_history[self.current_peer] = []
+            # Avoid duplicates
+            if {"type": "file", "filename": file_name, "data": file_bytes, "outgoing": outgoing} not in self.chat_history[self.current_peer]:
+                self.chat_history[self.current_peer].append({
+                    "type": "file",
+                    "filename": file_name,
+                    "data": file_bytes,
+                    "outgoing": outgoing
+                })
+
         btn = QPushButton(f"📎 {file_name}")
         btn.setStyleSheet(
             "text-align:left; background:#e0e0ff; padding:8px; border-radius:12px; font-size:14px;"
         )
         btn.clicked.connect(lambda: self.save_received_file(file_name, file_bytes))
+
         align_layout = QHBoxLayout()
-        align_layout.addWidget(btn)
-        align_layout.addStretch()
+        if outgoing:
+            align_layout.addStretch()
+            align_layout.addWidget(btn)
+        else:
+            align_layout.addWidget(btn)
+            align_layout.addStretch()
+
         container = QWidget()
         container.setLayout(align_layout)
         self.chat_area_layout.addWidget(container)
-        self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().maximum())
+        self.scroll_area.verticalScrollBar().setValue(
+            self.scroll_area.verticalScrollBar().maximum()
+        )
 
     def save_received_file(self, file_name, file_bytes):
         save_path, _ = QFileDialog.getSaveFileName(self, "Save File", file_name)
