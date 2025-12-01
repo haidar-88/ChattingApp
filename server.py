@@ -9,8 +9,23 @@ serverPort = 7777
 serverIP = '127.0.0.1'
 log_file = r'logs\server_log.jsonl'
 
+# Stores all connected clients:
+# {
+#     username: {
+#         "socket": socket_object,
+#         "address": (ip, port),
+#         "tcp_listener": tcp_port,
+#         "udp_listener": udp_port,
+#         "public_key": rsa_key,
+#         "last_seen": timestamp
+#     }
+# }
+
 active_clients = {} # {client_socket: {'addr': (ip, port), 'last_seen': timestamp}}
 
+# ----------------------------------------------------------------------
+# Write client login/logoff information to log file
+# ----------------------------------------------------------------------
 def write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, alive, timestamp):
     with open(log_file, 'a') as f:
         public_key_str = base64.b64encode(public_key.save_pkcs1()).decode()
@@ -19,18 +34,30 @@ def write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, alive,
         json.dump(data, f)
         f.write("\n")
 
+# ----------------------------------------------------------------------
+# Log any user -> user communication (message or file)
+# ----------------------------------------------------------------------
 def write_to_log_file_communication(type, sender, receiver, timestamp):
     with open(log_file, 'a') as f:
         data = {"type": type, "sender": sender, "receiver": receiver, "time": timestamp}
         json.dump(data, f)
         f.write("\n")
 
+# ----------------------------------------------------------------------
+# Log server requests such as Peer Discovery or Heartbeat
+# ----------------------------------------------------------------------
 def write_to_log_file_request(sender, request):
     with open(log_file, 'a') as f:
         data = {"sender": sender, "request": request}
         json.dump(data, f)
         f.write("\n")
 
+# ----------------------------------------------------------------------
+# Extract username, TCP/UDP ports, and RSA key from client initial message
+#
+# Expected format:
+#   USERNAME:<name>||tcp_port:<x>, udp_port:<y>||public_key:<base64>
+# ----------------------------------------------------------------------
 def get_username_and_ports(clientSocket):
     try:
         data = clientSocket.recv(4096).decode()
@@ -53,6 +80,10 @@ def get_username_and_ports(clientSocket):
         print("Error extracting client info:", e)
         return None, None, None
 
+# ----------------------------------------------------------------------
+# Main handler for each connected client
+# This runs in its own thread per client
+# ----------------------------------------------------------------------
 def handle_client(clientSocket, clientAddress):
     ip, port = clientAddress[0], clientAddress[1]
     username, tcp_port, udp_port, public_key = get_username_and_ports(clientSocket)
@@ -72,12 +103,16 @@ def handle_client(clientSocket, clientAddress):
                         "udp_listener": udp_port,
                         "last_seen": time.time()
                     }
+    
+    # Make recv() timeout to allow heartbeat checks
     clientSocket.settimeout(1)
 
     while True:
         try:
             try:
                 message = clientSocket.recv(2048).decode()
+
+                # Client disconnected
                 if not message:
                     print(f'Client closed connection, IP: {ip}, Port: {port}, time: {time.time()}')
                     write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, False, time.time())
@@ -85,8 +120,13 @@ def handle_client(clientSocket, clientAddress):
                     clientSocket.close()
                     return
                 print('Received Message: ', repr(message))
+
+                # ----------------------------------------------------------
+                # Peer Discovery Request
+                # ----------------------------------------------------------
                 if message.upper().startswith('PEER_DISC'):
                     try:
+                        # Build peer list including RSA keys
                         peer_list = {
                             user: {
                                 "ip": info["address"][0],
@@ -96,18 +136,25 @@ def handle_client(clientSocket, clientAddress):
                             }
                             for user, info in active_clients.items()
                         }
+                        # Send list back to requesting client
                         clientSocket.send(json.dumps(peer_list).encode())
                         write_to_log_file_request(username, "Peer Discovery")
 
                     except Exception as e: 
                         print('Error Sending Peer Discovery Content.')
 
+                # ----------------------------------------------------------
+                # Heartbeat ping from client
+                # ----------------------------------------------------------
                 elif message.upper().startswith("PING"):
                     active_clients[username]['last_seen'] = time.time()
                     print("Sent a heartbeat ACK to Client")
                     clientSocket.send('ACK'.encode())
                     write_to_log_file_request(username, "Heartbeat - ACKING BACK")
 
+                # ----------------------------------------------------------
+                # Message Sent Logging
+                # ----------------------------------------------------------
                 elif message.startswith("MESSAGESENT"):
                     parts = message.split('|')
                     sender = parts[1]
@@ -115,6 +162,9 @@ def handle_client(clientSocket, clientAddress):
                     write_to_log_file_communication('Message', sender, receiver, time.time())
                     print(f"Message Sent from {sender} to {receiver}")
 
+                # ----------------------------------------------------------
+                # File Sent Logging
+                # ----------------------------------------------------------
                 elif message.upper().startswith("FILESENT"):
                     parts = message.split('|')
                     sender = parts[1]
@@ -123,8 +173,11 @@ def handle_client(clientSocket, clientAddress):
                     print(f"Message Sent from {sender} to {receiver}")
 
             except timeout:
-                    pass # no data received in this interval, continue
+                    pass # no data received in this interval, Normal timeout for heartbeat check
             
+            # --------------------------------------------------------------
+            # Heartbeat timeout (client dead)
+            # --------------------------------------------------------------
             if time.time() - active_clients[username]['last_seen'] > 60:
                 print(f"Client timed out: {ip}:{port}")
                 # Log to JSON file
@@ -149,6 +202,9 @@ def handle_client(clientSocket, clientAddress):
                 active_clients.pop(username, None)
             break
 
+# ----------------------------------------------------------------------
+# Main server entry: listens and accepts clients
+# ----------------------------------------------------------------------
 if __name__ == '__main__':
     try:
         serverSocket = socket(AF_INET, SOCK_STREAM)
@@ -162,6 +218,7 @@ if __name__ == '__main__':
 
     while True:
         try:
+            # Accept new client and spawn a thread for them
             clientSocket, clientAddress = serverSocket.accept()
             client_main_thread = threading.Thread(target=handle_client, args=(clientSocket, clientAddress))
             client_main_thread.start()

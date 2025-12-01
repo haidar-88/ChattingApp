@@ -2,10 +2,18 @@ from PyQt5.QtCore import QThread, pyqtSignal
 import time
 import threading
 
-# ------------------- Server Communication -------------------
+# ===============================================================
+#                     SERVER COMMUNICATION THREAD
+# Handles:
+#   • Connecting to server
+#   • Sending username, ports, and public key
+#   • Requesting peer list every 2 seconds
+#   • Sending heartbeat every 30 seconds
+#   • Emitting signals to update GUI
+# ===============================================================
 class ServerCommunicationThread(QThread):
-    peer_list_updated = pyqtSignal(dict)
-    server_connection_status = pyqtSignal(bool)
+    peer_list_updated = pyqtSignal(dict) # Emits updated peer list
+    server_connection_status = pyqtSignal(bool) # Emits True/False when connected/disconnected
     
     def __init__(self, network_manager):
         super().__init__()
@@ -13,22 +21,29 @@ class ServerCommunicationThread(QThread):
         self.running = True
     
     def run(self):
+        # Initial connection to server
         if self.network_manager.connect_to_server():
             print('Connected to server')
+
+        # Send username, TCP/UDP ports, and public key
         if self.network_manager.send_username_ports_key():
             print('Username and Ports sent')
+
         heartbeat_timer = 0
         while self.running:
             time.sleep(2)
+            # Get online peers
             peers = self.network_manager.request_peer_list()
-            #print('Peer List: ',[ name for name, info in peers.items()])
             self.peer_list_updated.emit(peers)
+
+            # Send heartbeat every 30 seconds
             if heartbeat_timer >= 30:
                 if heartbeat_timer > 60:
                     self.stop()
                     continue
                 print('sending heartbeat')
                 connected = self.network_manager.send_heartbeat()
+                # If heartbeat successful → reset timer
                 if connected:
                     heartbeat_timer = 0
                 self.server_connection_status.emit(connected)
@@ -39,7 +54,14 @@ class ServerCommunicationThread(QThread):
         self.running = False
 
 
-# ------------------- TCP Listener -------------------
+# ===============================================================
+#                        TCP LISTENER THREAD
+# Handles:
+#   • Listening for incoming TCP connections
+#   • Spawning a new thread for each peer connection
+#   • Receiving text messages
+#   • Emitting messages to GUI
+# ===============================================================
 class TCPListenerThread(QThread):
     message_received = pyqtSignal(str, str)  # username, message
     connection_closed = pyqtSignal(str)      # peer_id
@@ -86,17 +108,16 @@ class TCPListenerThread(QThread):
             client_socket.close()
         except:
             pass
-            """peer_username, message = self.network_manager.receive_tcp_message(client_socket)
-            if message is None:
-                continue
-            message = message.strip()
-            self.message_received.emit(peer_username, message)"""
-
     
     def stop(self):
         self.running = False
 
-# ------------------- UDP Listener -------------------
+# ===============================================================
+#                        UDP LISTENER THREAD
+# Handles:
+#   • Receiving FILE_START, FILE_CHUNK, FILE_END packets
+#   • Emits signals for GUI + file handling system
+# ===============================================================
 class UDPListenerThread(QThread):
     file_start_received = pyqtSignal(dict)
     file_chunk_received = pyqtSignal(tuple)
@@ -122,7 +143,13 @@ class UDPListenerThread(QThread):
     def stop(self):
         self.running = False
 
-# ------------------- File Transfer -------------------
+# ===============================================================
+#                   FILE TRANSFER (UDP SENDER) THREAD
+# Handles:
+#   • Sending file in chunks over UDP
+#   • Reporting progress to GUI
+#   • Emitting transfer_complete when finished
+# ===============================================================
 class FileTransferThread(QThread):
     transfer_progress = pyqtSignal(int, int)  # chunk_number, chunk_size
     transfer_complete = pyqtSignal()
@@ -134,6 +161,7 @@ class FileTransferThread(QThread):
         self.file_path = file_path
     
     def run(self):
+        # Send file chunk-by-chunk
         for chunk_number, chunk_size in self.network_manager.send_file_udp(self.peer_id, self.file_path):
             self.transfer_progress.emit(chunk_number, chunk_size)
         self.transfer_complete.emit()
