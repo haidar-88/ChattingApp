@@ -5,6 +5,8 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 import os
+import json
+import struct
 from network import CHUNK_SIZE
 
 class ChatWindow(QMainWindow):
@@ -68,7 +70,6 @@ class ChatWindow(QMainWindow):
         # File send button
         self.send_file_btn = QPushButton("Send File")
         self.send_file_btn.setEnabled(False)
-        self.send_file_btn.clicked.connect(self.select_and_send_file)
         self.main_layout.addWidget(self.send_file_btn)
 
         self.file_progress_label = QLabel("")
@@ -155,20 +156,6 @@ class ChatWindow(QMainWindow):
                 # Only add clickable file once
                 self.add_clickable_file_message(item["filename"], item["data"], outgoing=item["outgoing"], add_to_history=False)
 
-    # ======================== File Transfer ========================
-    def select_and_send_file(self):
-        if not self.current_peer:
-            return
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select File to Send")
-        if file_path:
-            for chunk_number, chunk_size in self.network_manager.send_file_udp(self.current_peer, file_path):
-                self.file_progress_label.setText(f"Sent chunk {chunk_number}, size {chunk_size} bytes")
-            self.file_progress_label.setText("")
-
-            with open(file_path, "rb") as f:
-                file_bytes = f.read()
-            self.add_clickable_file_message(os.path.basename(file_path), file_bytes, outgoing=True)
-
     def handle_file_start(self, metadata, addr=None):
         self.file_transfer_total = metadata.get("size", 0)
         self.file_transfer_received = 0
@@ -230,7 +217,10 @@ class ChatWindow(QMainWindow):
         sender_username = metadata.get("sender", self.current_peer)
         self.file_progress_label.setText("")
         #self.add_clickable_file_message(self.incoming_file_name, self.incoming_file_buffer)
-        
+
+        if not self.incoming_file_name:
+            return
+ 
         # Write final file
         final_path = os.path.join("received_files", self.incoming_file_name)
         with open(final_path, "wb") as f:

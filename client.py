@@ -26,6 +26,7 @@ class ChatClient:
         if not ok or not username.strip():
             username = 'User' + random.randint(1,1000)
 
+        
         priv_path = f"keys\\{username}_private.pem"
         pub_path = f"keys\\{username}_public.pem"
 
@@ -52,6 +53,8 @@ class ChatClient:
         self.server_thread = None
         self.tcp_listener_thread = None
         self.udp_listener_thread = None
+
+        self.active_file_transfers = []
 
         # Connect signals and slots
         self.setup_connections()
@@ -87,8 +90,7 @@ class ChatClient:
         self.server_thread.server_connection_status.connect(self.gui.update_server_status)
         self.server_thread.start()
 
-
-    def GenerateEncryptionKeys(bits = 2048): #RSA to enrcrypt the AES symmetric key in order to exchange it securly 
+    def GenerateEncryptionKeys(self, bits = 2048): #RSA to enrcrypt the AES symmetric key in order to exchange it securly 
         public_key, private_key = rsa.newkeys(bits)
         return private_key, public_key
 
@@ -129,18 +131,30 @@ class ChatClient:
         if peer_username not in self.network_manager.peer_list:
             QMessageBox.warning(self.gui, "Error", "Peer not found in peer list.")
             return
+        
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
+        self.gui.add_clickable_file_message(
+            os.path.basename(file_path), file_bytes, outgoing=True
+        )
 
         # Start file transfer in a separate thread
         transfer_thread = FileTransferThread(self.network_manager, peer_username, file_path)
         transfer_thread.transfer_progress.connect(self.update_file_progress)
-        transfer_thread.transfer_complete.connect(self.file_transfer_complete)
+        def on_transfer_complete():
+            self.file_transfer_complete()
+            if transfer_thread in self.active_file_transfers:
+                self.active_file_transfers.remove(transfer_thread)
+        
+        transfer_thread.transfer_complete.connect(on_transfer_complete)
+        
+        self.active_file_transfers.append(transfer_thread)
         transfer_thread.start()
 
     def update_file_progress(self, chunk_number, chunk_size):
         self.gui.file_progress_label.setText(f"Sent chunk {chunk_number}, size {chunk_size} bytes")
 
     def file_transfer_complete(self):
-        self.gui.chat_display.append("File transfer completed")
         self.gui.file_progress_label.setText("")
 
     # ------------------- Peer Disconnect -------------------

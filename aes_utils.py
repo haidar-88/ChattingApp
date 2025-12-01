@@ -17,3 +17,4 @@ def aes_decrypt(key, ciphertext):
     iv = b'\x00'*16  # same IV as used in encryption
     cipher = AES.new(key, AES.MODE_CBC, iv)
     return unpad(cipher.decrypt(ciphertext), BLOCK_SIZE)
+

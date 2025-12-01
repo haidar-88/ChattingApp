@@ -11,9 +11,23 @@ log_file = r'logs\server_log.jsonl'
 
 active_clients = {} # {client_socket: {'addr': (ip, port), 'last_seen': timestamp}}
 
-def write_to_log_file(ip, port, alive, timestamp):
+def write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, alive, timestamp):
     with open(log_file, 'a') as f:
-        data = {"ip": ip, "port": port, "is_alive": alive, "time": timestamp}
+        public_key_str = base64.b64encode(public_key.save_pkcs1()).decode()
+        data = {"username": username, "ip": ip, "connection_port": port, "is_alive": alive, 
+                "tcp_listener_port": tcp_port, "udp_listener_port": udp_port, "public_RSA_key": public_key_str, "time": timestamp}
+        json.dump(data, f)
+        f.write("\n")
+
+def write_to_log_file_communication(type, sender, receiver, timestamp):
+    with open(log_file, 'a') as f:
+        data = {"type": type, "sender": sender, "receiver": receiver, "time": timestamp}
+        json.dump(data, f)
+        f.write("\n")
+
+def write_to_log_file_request(sender, request):
+    with open(log_file, 'a') as f:
+        data = {"sender": sender, "request": request}
         json.dump(data, f)
         f.write("\n")
 
@@ -42,6 +56,7 @@ def get_username_and_ports(clientSocket):
 def handle_client(clientSocket, clientAddress):
     ip, port = clientAddress[0], clientAddress[1]
     username, tcp_port, udp_port, public_key = get_username_and_ports(clientSocket)
+    write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, True, time.time())
 
     if username is None:
         print("Client disconnected or sent invalid data.")
@@ -65,7 +80,7 @@ def handle_client(clientSocket, clientAddress):
                 message = clientSocket.recv(2048).decode()
                 if not message:
                     print(f'Client closed connection, IP: {ip}, Port: {port}, time: {time.time()}')
-                    write_to_log_file(ip, port, False, time.time())
+                    write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, False, time.time())
                     active_clients.pop(username, None)
                     clientSocket.close()
                     return
@@ -82,13 +97,30 @@ def handle_client(clientSocket, clientAddress):
                             for user, info in active_clients.items()
                         }
                         clientSocket.send(json.dumps(peer_list).encode())
+                        write_to_log_file_request(username, "Peer Discovery")
 
                     except Exception as e: 
                         print('Error Sending Peer Discovery Content.')
 
                 elif message.upper().startswith("PING"):
                     active_clients[username]['last_seen'] = time.time()
+                    print("Sent a heartbeat ACK to Client")
                     clientSocket.send('ACK'.encode())
+                    write_to_log_file_request(username, "Heartbeat - ACKING BACK")
+
+                elif message.startswith("MESSAGESENT"):
+                    parts = message.split('|')
+                    sender = parts[1]
+                    receiver = parts[2]
+                    write_to_log_file_communication('Message', sender, receiver, time.time())
+                    print(f"Message Sent from {sender} to {receiver}")
+
+                elif message.upper().startswith("FILESENT"):
+                    parts = message.split('|')
+                    sender = parts[1]
+                    receiver = parts[2]
+                    write_to_log_file_communication('File', sender, receiver, time.time())
+                    print(f"Message Sent from {sender} to {receiver}")
 
             except timeout:
                     pass # no data received in this interval, continue
@@ -96,14 +128,14 @@ def handle_client(clientSocket, clientAddress):
             if time.time() - active_clients[username]['last_seen'] > 60:
                 print(f"Client timed out: {ip}:{port}")
                 # Log to JSON file
-                write_to_log_file(ip, port, False, time.time())
+                write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, False, time.time())
                 clientSocket.close()
                 active_clients.pop(username, None)
                 break
 
         except ConnectionResetError:
             print(f"Client {ip}:{port} disconnected abruptly")
-            write_to_log_file(ip, port, False, time.time())
+            write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, False, time.time())
             clientSocket.close()
             if username in active_clients:
                 active_clients.pop(username, None)
@@ -111,7 +143,7 @@ def handle_client(clientSocket, clientAddress):
 
         except Exception as e:
             print("Handle Client Error: ", e)
-            write_to_log_file(ip, port, False, time.time())
+            write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, False, time.time())
             clientSocket.close()
             if username in active_clients:
                 active_clients.pop(username, None)

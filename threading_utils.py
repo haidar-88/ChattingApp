@@ -137,3 +137,4 @@ class FileTransferThread(QThread):
         for chunk_number, chunk_size in self.network_manager.send_file_udp(self.peer_id, self.file_path):
             self.transfer_progress.emit(chunk_number, chunk_size)
         self.transfer_complete.emit()
+        

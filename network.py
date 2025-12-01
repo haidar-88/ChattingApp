@@ -93,6 +93,11 @@ class NetworkManager:
             pass
         return False
 
+    def signal_communication(self, type, sender, receiver):
+        message = f"{type}|{sender}|{receiver}".encode()
+        self.server_socket.send(message)
+        print(f"signaled to server {type}")
+    
     # -----------------------------
     # TCP Listener
     # -----------------------------
@@ -152,7 +157,6 @@ class NetworkManager:
                 return None, None, True
 
             message = data.decode()
-            print(message)
 
             # If AES_KEY, save it with a temporary key
             if message.startswith("AES_KEY:"):
@@ -195,53 +199,6 @@ class NetworkManager:
         except Exception as e:
             print(f"Error decrypting TCP message: {e}")
             return None, None, False
-        
-        """try:
-            data = peer_socket.recv(8192)
-            if not data:
-                return ""
-
-            message = data.decode()
-            print(message)
-
-            # If AES_KEY, save it with a temporary key
-            if message.startswith("AES_KEY:"):
-                encrypted_key_b64 = message[len("AES_KEY:"):]
-                encrypted_bytes = base64.b64decode(encrypted_key_b64)
-                aes_key = rsa.decrypt(encrypted_bytes, self.private_key)
-                print('AES Key decrypted:', aes_key)
-
-                # Use the socket's id as a temporary key
-                temp_key = id(peer_socket)
-                self.peer_aes_keys[temp_key] = aes_key
-                print('Saved AES key temporarily:', self.peer_aes_keys)
-                return (None, None)
-
-            print('Before Splitting and Decrypting: ', message)
-            # For normal messages
-            if "|" in message:
-                peer_username, enc_bytes = message.split("|", 1)
-                if peer_username not in self.active_peer_connections:
-                    self.active_peer_connections[peer_username] = peer_socket
-
-                # If AES key was stored under temporary key, move it to real username
-                temp_key = id(peer_socket)
-                if temp_key in self.peer_aes_keys:
-                    self.peer_aes_keys[peer_username] = self.peer_aes_keys.pop(temp_key)
-
-                if peer_username in self.peer_aes_keys:
-                    # Convert base64 back to bytes
-                    encrypted_bytes = base64.b64decode(enc_bytes)
-                    plaintext = aes_decrypt(self.peer_aes_keys[peer_username], encrypted_bytes)
-                    return (peer_username, plaintext.decode())
-                else:
-                    return (None, "[Encrypted message, AES key not established]")
-
-        except timeout:
-            return (None, None)
-        except Exception as e:
-            print(f"Error decrypting TCP message: {e}")
-            return (None, None)"""
 
     def send_tcp_message(self, peer_username, message):
         sock = self.connect_to_peer_tcp(peer_username)
@@ -255,6 +212,7 @@ class NetworkManager:
 
             info = f"{peer_username}|{encrypted_b64}"
             sock.send(info.encode())  # now this is safe
+            self.signal_communication('MESSAGESENT', self.username, peer_username)
             return True
 
         except Exception:
@@ -300,6 +258,7 @@ class NetworkManager:
                 data, _ = self.udp_listener_socket.recvfrom(1024)
                 if data[0] == 4:  # ACK
                     ack_id = struct.unpack("!I", data[1:5])[0]
+                    print('received ACK from the file chunck transfer, ACK: ', ack_id)
                     return ack_id == expected_id
                 return False
             except timeout:
@@ -373,7 +332,7 @@ class NetworkManager:
                 self.udp_listener_socket.sendto(packet, (ip, udp_port))
                 if wait_for_ack(reserved_ack):
                     break
-
+            self.signal_communication('FILESENT', self.username, peer_username)
             return True
 
         except Exception as e:
