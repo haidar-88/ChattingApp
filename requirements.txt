@@ -1,0 +1,4 @@
+rsa>=4.9
+PyQt5>=5.15.0
+pycryptodome>=3.19.0
+
