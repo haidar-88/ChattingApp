@@ -1,3 +1,7 @@
+"""
+server.py - Central server for the chat application
+Handles client connections, peer discovery, heartbeat monitoring, and logging
+"""
 from socket import *
 import json
 import threading
@@ -5,23 +9,32 @@ import time
 import base64
 from rsa_utils import load_key_for_server
 
-# --- Server Configuration ---
-serverPort = 7777
-serverIP = '127.0.0.1'
-log_file = r'logs\server_log.jsonl' # Log file for client activity (JSON Lines format)
+# Server configuration constants
+serverPort = 7777  # Port on which the server listens for client connections
+serverIP = '127.0.0.1'  # Server IP address (localhost)
+log_file = r'logs\server_log.jsonl'  # Path to log file for storing client activities
 
-# Global dictionary to store information about currently connected clients
-# Key: username (string), Value: dictionary of client metadata
-active_clients = {} # {username: {'socket': socket_obj, 'address': (ip, port), ...}}
-
-# ------------------------------------
-# --- Logging Functions ---
-# ------------------------------------
+# Global dictionary to track active clients
+# Format: {username: {'socket': socket, 'address': (ip, port), 'public_key': key, 
+#                      'tcp_listener': port, 'udp_listener': port, 'last_seen': timestamp}}
+active_clients = {}
 
 def write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, alive, timestamp):
-    """Logs client connection/disconnection events with comprehensive details."""
+    """
+    Logs client connection/disconnection events to the log file.
+    
+    Args:
+        username: Client's username
+        ip: Client's IP address
+        port: Port used for server connection
+        tcp_port: Port client listens on for TCP messages
+        udp_port: Port client listens on for UDP file transfers
+        public_key: Client's RSA public key
+        alive: Boolean indicating if client is connected (True) or disconnected (False)
+        timestamp: Unix timestamp of the event
+    """
     with open(log_file, 'a') as f:
-        # Serialize RSA public key to a Base64 string for logging
+        # Encode public key as base64 string for JSON storage
         public_key_str = base64.b64encode(public_key.save_pkcs1()).decode()
         data = {
             "username": username, 
@@ -37,14 +50,28 @@ def write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, alive,
         f.write("\n")
 
 def write_to_log_file_communication(type, sender, receiver, timestamp):
-    """Logs P2P communication events (Message or File transfer signals)."""
+    """
+    Logs communication events (messages or file transfers) between clients.
+    
+    Args:
+        type: Type of communication ('Message' or 'File')
+        sender: Username of the sender
+        receiver: Username of the receiver
+        timestamp: Unix timestamp of the event
+    """
     with open(log_file, 'a') as f:
         data = {"type": type, "sender": sender, "receiver": receiver, "time": timestamp}
         json.dump(data, f)
         f.write("\n")
 
 def write_to_log_file_request(sender, request):
-    """Logs client requests to the server (e.g., Peer Discovery, Heartbeat)."""
+    """
+    Logs client requests (e.g., peer discovery, heartbeat) to the log file.
+    
+    Args:
+        sender: Username of the client making the request
+        request: Description of the request (e.g., "Peer Discovery", "Heartbeat")
+    """
     with open(log_file, 'a') as f:
         data = {"sender": sender, "request": request, "time": time.time()} # Added time here for consistency
         json.dump(data, f)
@@ -56,23 +83,31 @@ def write_to_log_file_request(sender, request):
 
 def get_username_and_ports(clientSocket):
     """
-    Receives the initial client handshake data, which contains:
-    Username, P2P TCP Port, P2P UDP Port, and RSA Public Key.
+    Extracts client information from the initial connection message.
+    Expected format: "USERNAME:username||tcp_port:port, udp_port:port||public_key:base64_key"
+    
+    Args:
+        clientSocket: Socket connected to the client
+        
+    Returns:
+        Tuple of (username, tcp_port, udp_port, public_key) or (None, None, None, None) on error
     """
     try:
-        # Expected format: USERNAME:user||tcp_port:1234, udp_port:5678||public_key:b64_key
+        # Receive initial client registration data
         data = clientSocket.recv(4096).decode()
         print("Received raw:", repr(data))
 
+        # Parse the message format: USERNAME||PORTS||PUBLIC_KEY
         user_part, ports_part, key_part = data.split("||")
 
+        # Extract username
         username = user_part.split(":")[1].strip()
 
-        # Extracting TCP and UDP ports
+        # Extract TCP and UDP listener ports
         tcp_port = ports_part.split(",")[0].split(":")[1].strip()
         udp_port = ports_part.split(",")[1].split(":")[1].strip()
 
-        # Decoding and loading the RSA public key
+        # Extract and decode public key
         public_key_b64 = key_part.split(":")[1].strip()
         public_key_bytes = base64.b64decode(public_key_b64)
         public_key = load_key_for_server(public_key_bytes) # Utility function to load key
@@ -85,43 +120,50 @@ def get_username_and_ports(clientSocket):
 
 def handle_client(clientSocket, clientAddress):
     """
-    Manages the connection and command loop for a single client in a separate thread.
-    This is the core logic of the server/registry.
+    Handles communication with a connected client in a separate thread.
+    Manages peer discovery requests, heartbeat monitoring, and communication logging.
+    
+    Args:
+        clientSocket: Socket connected to the client
+        clientAddress: Tuple of (IP address, port) of the client
     """
     ip, port = clientAddress[0], clientAddress[1]
     
-    # 1. Initial Handshake
+    # Extract client registration information
     username, tcp_port, udp_port, public_key = get_username_and_ports(clientSocket)
-    
+    write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, True, time.time())
+
+    # Validate client registration
     if username is None:
         print("Client disconnected or sent invalid data.")
         clientSocket.close()
         return
-    
-    # Log the successful connection
-    write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, True, time.time())
 
+    # Register client in active clients dictionary
     print(f'UPDATED CLIENT INFO: Client connected, IP: {ip}, Port With Server: {port}, Username: {username}, tcp port {tcp_port}, udp port {udp_port}')
     
     # Store client data in the global registry
     active_clients[username] = {
-        "socket": clientSocket,
-        "address": (ip, port),
-        "public_key": public_key,
-        "tcp_listener": tcp_port,
-        "udp_listener": udp_port,
-        "last_seen": time.time()
-    }
-    clientSocket.settimeout(1) # Set a small timeout for non-blocking recv
+                        "socket": clientSocket,
+                        "address": (ip, port),
+                        "public_key": public_key,
+                        "tcp_listener": tcp_port,
+                        "udp_listener": udp_port,
+                        "last_seen": time.time()
+                    }
+    # Set socket timeout for non-blocking receive operations
+    clientSocket.settimeout(1)
 
-    # 2. Main Client Loop (Heartbeat and Request Handling)
+    # Main client communication loop
     while True:
         try:
             try:
+                # Receive message from client
                 message = clientSocket.recv(2048).decode()
                 
                 # If no message is received (socket closed gracefully)
                 if not message:
+                    # Client closed connection gracefully
                     print(f'Client closed connection, IP: {ip}, Port: {port}, time: {time.time()}')
                     write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, False, time.time())
                     active_clients.pop(username, None)
@@ -130,10 +172,10 @@ def handle_client(clientSocket, clientAddress):
                 
                 print('Received Message: ', repr(message))
                 
-                # --- Handle Peer Discovery Request ---
+                # Handle peer discovery request
                 if message.upper().startswith('PEER_DISC'):
                     try:
-                        # Build the peer list for the client, excluding the client itself
+                        # Build peer list with all active clients (excluding the requester)
                         peer_list = {
                             user: {
                                 "ip": info["address"][0],
@@ -145,20 +187,21 @@ def handle_client(clientSocket, clientAddress):
                             for user, info in active_clients.items()
                             if user != username
                         }
+                        # Send peer list as JSON
                         clientSocket.send(json.dumps(peer_list).encode())
                         write_to_log_file_request(username, "Peer Discovery")
 
                     except Exception as e: 
                         print('Error Sending Peer Discovery Content.', e)
 
-                # --- Handle Heartbeat Request ---
+                # Handle heartbeat (keep-alive) message
                 elif message.upper().startswith("PING"):
                     active_clients[username]['last_seen'] = time.time() # Update last seen time
                     print("Sent a heartbeat ACK to Client")
                     clientSocket.send('ACK'.encode())
                     write_to_log_file_request(username, "Heartbeat - ACKING BACK")
 
-                # --- Handle Communication Signals (for logging purposes only) ---
+                # Handle message sent notification
                 elif message.startswith("MESSAGESENT"):
                     parts = message.split('|')
                     sender = parts[1]
@@ -166,6 +209,7 @@ def handle_client(clientSocket, clientAddress):
                     write_to_log_file_communication('Message', sender, receiver, time.time())
                     print(f"Message Sent from {sender} to {receiver}")
 
+                # Handle file sent notification
                 elif message.upper().startswith("FILESENT"):
                     parts = message.split('|')
                     sender = parts[1]
@@ -174,11 +218,12 @@ def handle_client(clientSocket, clientAddress):
                     print(f"File Sent from {sender} to {receiver}")
 
             except timeout:
-                pass # Expected behavior when using settimeout(1)
+                    # No data received in this interval, continue to timeout check
+                    pass
             
-            # 3. Handle Client Timeout (Inactivity)
-            # If no PING has been received for more than 60 seconds
+            # Check if client has timed out (no heartbeat for 60 seconds)
             if time.time() - active_clients[username]['last_seen'] > 60:
+                # Client timeout: no heartbeat received for 60 seconds
                 print(f"Client timed out: {ip}:{port}")
                 write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, False, time.time())
                 clientSocket.close()
@@ -186,7 +231,7 @@ def handle_client(clientSocket, clientAddress):
                 break # Exit loop and thread
 
         except ConnectionResetError:
-            # Handle abrupt disconnection
+            # Client disconnected abruptly (connection reset)
             print(f"Client {ip}:{port} disconnected abruptly")
             write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, False, time.time())
             clientSocket.close()
@@ -195,7 +240,7 @@ def handle_client(clientSocket, clientAddress):
             break
 
         except Exception as e:
-            # Catch all other exceptions
+            # Handle any other unexpected errors
             print("Handle Client Error: ", e)
             write_to_log_file(username, ip, port, tcp_port, udp_port, public_key, False, time.time())
             clientSocket.close()
@@ -208,8 +253,13 @@ def handle_client(clientSocket, clientAddress):
 # ------------------------------------
 
 if __name__ == '__main__':
+    """
+    Main server entry point.
+    Creates a TCP socket, binds to the server port, and listens for client connections.
+    Each client connection is handled in a separate thread.
+    """
     try:
-        # Create and bind the main server socket
+        # Create TCP socket and bind to server address
         serverSocket = socket(AF_INET, SOCK_STREAM)
         serverSocket.bind((serverIP, serverPort))
     except Exception as e:
@@ -219,11 +269,12 @@ if __name__ == '__main__':
     serverSocket.listen(5) # Allow up to 5 pending connections
     print('Server is ready to receive connections')
 
-    # Continuous loop to accept new client connections
+    # Main server loop: accept connections and spawn handler threads
     while True:
         try:
+            # Accept a new client connection
             clientSocket, clientAddress = serverSocket.accept()
-            # Start a new thread to handle the incoming client connection
+            # Create a new thread to handle this client
             client_main_thread = threading.Thread(target=handle_client, args=(clientSocket, clientAddress))
             client_main_thread.start()
         except Exception as e:

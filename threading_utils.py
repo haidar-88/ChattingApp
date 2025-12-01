@@ -1,32 +1,43 @@
-from PyQt5.QtCore import QThread, pyqtSignal # Base classes for threading and signals
+"""
+threading_utils.py - Background thread classes for network operations
+Provides QThread-based classes for handling server communication, TCP/UDP listeners,
+and file transfers in separate threads to keep the GUI responsive.
+"""
+from PyQt5.QtCore import QThread, pyqtSignal
 import time
 import threading # Standard Python threading for handling multiple concurrent peer connections
 
 # ------------------- Server Communication (QThread) -------------------
 class ServerCommunicationThread(QThread):
     """
-    Handles continuous communication with the central discovery server, 
-    including peer list requests and heartbeats.
+    Background thread for server communication.
+    Handles peer discovery requests and heartbeat monitoring.
     """
-    # Signals emitted to the GUI thread
-    peer_list_updated = pyqtSignal(dict)    # Emits the latest list of active peers
-    server_connection_status = pyqtSignal(bool) # Emits True/False based on heartbeat success
+    # Qt signals for thread-safe GUI updates
+    peer_list_updated = pyqtSignal(dict)  # Emitted when peer list changes
+    server_connection_status = pyqtSignal(bool)  # Emitted when connection status changes
     
     def __init__(self, network_manager):
+        """
+        Initialize the server communication thread.
+        
+        Args:
+            network_manager: NetworkManager instance to use for server operations
+        """
         super().__init__()
         self.network_manager = network_manager
         self.running = True
     
     def run(self):
-        """Main loop for server registration, peer discovery, and heartbeat."""
-        # 1. Initial Connection and Registration
+        """
+        Main thread execution loop.
+        Connects to server, sends registration, and periodically requests peer list and sends heartbeat.
+        """
+        # Connect to server
         if self.network_manager.connect_to_server():
             print('Connected to server')
-        else:
-            self.server_connection_status.emit(False)
-            self.stop()
-            return
-
+        
+        # Send registration information
         if self.network_manager.send_username_ports_key():
             print('Username and Ports sent')
         
@@ -34,18 +45,16 @@ class ServerCommunicationThread(QThread):
         
         # 2. Continuous Operation Loop
         while self.running:
-            time.sleep(2)
+            time.sleep(2)  # Wait 2 seconds between iterations
             
-            # Request and emit updated peer list every 2 seconds
+            # Request updated peer list
             peers = self.network_manager.request_peer_list()
             self.peer_list_updated.emit(peers)
             
-            heartbeat_timer += 2
-
-            # Send Heartbeat (PING) every 30 seconds
+            # Send heartbeat every 30 seconds, timeout after 60 seconds
             if heartbeat_timer >= 30:
                 if heartbeat_timer > 60:
-                    # Connection failed for two consecutive heartbeats (30s interval * 2)
+                    # Connection lost, stop thread
                     self.stop()
                     continue
                 
@@ -53,13 +62,13 @@ class ServerCommunicationThread(QThread):
                 connected = self.network_manager.send_heartbeat()
                 
                 if connected:
-                    heartbeat_timer = 0
-                
-                # Signal the connection status back to the GUI
+                    heartbeat_timer = 0  # Reset timer on successful heartbeat
                 self.server_connection_status.emit(connected)
     
     def stop(self):
-        """Safely stops the thread and signals disconnection."""
+        """
+        Stop the thread execution loop.
+        """
         self.server_connection_status.emit(False)
         self.running = False
 
@@ -67,26 +76,36 @@ class ServerCommunicationThread(QThread):
 # ------------------- TCP Listener (QThread) -------------------
 class TCPListenerThread(QThread):
     """
-    Listens for incoming TCP connections (P2P chat) and delegates 
-    the handling of each new connection to a separate standard Python thread.
+    Background thread for listening to incoming TCP connections from peers.
+    Accepts connections and spawns handler threads for each peer.
     """
-    # Signals emitted to the GUI thread
-    message_received = pyqtSignal(str, str) # Emits received chat message (username, message content)
-    connection_closed = pyqtSignal(str)     # Emits username when a peer disconnects
+    # Qt signals for thread-safe GUI updates
+    message_received = pyqtSignal(str, str)  # Emitted when message received: (username, message)
+    connection_closed = pyqtSignal(str)      # Emitted when peer disconnects: (peer_username)
     
     def __init__(self, network_manager):
+        """
+        Initialize the TCP listener thread.
+        
+        Args:
+            network_manager: NetworkManager instance to use for TCP operations
+        """
         super().__init__()
         self.network_manager = network_manager
         self.running = True
     
     def run(self):
-        """Starts the main TCP listening socket and accepts new connections."""
+        """
+        Main thread execution loop.
+        Starts TCP listener and accepts incoming peer connections.
+        """
         self.network_manager.start_tcp_listener()
         while self.running:
             # Non-blocking accept call
             result = self.network_manager.accept_tcp_connection()
             
             if result:
+                # New connection accepted, spawn handler thread
                 client_socket, addr = result
                 # Start a new, non-QThread to handle ongoing communication with this specific peer
                 threading.Thread(
@@ -97,10 +116,13 @@ class TCPListenerThread(QThread):
                 
     def handle_peer(self, client_socket, addr):
         """
-        Runs in a standard thread to continuously receive messages from one peer.
-        This isolates each peer's communication and decryption process.
+        Handle communication with a single peer connection.
+        Runs in a separate thread for each peer.
+        
+        Args:
+            client_socket: Socket connected to the peer
+            addr: Peer address tuple (IP, port)
         """
-        peer_username = None # Initialize username for disconnection signal
         while self.running:
             # receive_tcp_message handles decryption and key exchange
             peer_username_temp, message, disconnected = self.network_manager.receive_tcp_message(client_socket)
@@ -119,46 +141,58 @@ class TCPListenerThread(QThread):
             if not message or not peer_username:
                 continue
 
-            # Ensure the active socket is saved under the username in the NetworkManager
+            # Update active connections if needed
             if peer_username not in self.network_manager.active_peer_connections:
                 self.network_manager.active_peer_connections[peer_username] = client_socket
 
-            # Emit message to GUI (Safe signal to QThread)
+            # Emit message to GUI (thread-safe signal)
             self.message_received.emit(peer_username, message)
 
-        # Clean up socket when the inner loop breaks
+        # Clean up socket on exit
         try:
             client_socket.close()
         except:
             pass
     
     def stop(self):
-        """Safely stops the listener thread."""
+        """
+        Stop the thread execution loop.
+        """
         self.running = False
 
 # ------------------- UDP Listener (QThread) -------------------
 class UDPListenerThread(QThread):
     """
-    Listens for incoming UDP packets related to file transfer (FILE_START, FILE_CHUNK, FILE_END).
+    Background thread for listening to incoming UDP file transfers from peers.
+    Receives file transfer packets and emits signals for GUI handling.
     """
-    # Signals emitted to the GUI thread for file transfer state management
-    file_start_received = pyqtSignal(dict) # Signals new file transfer attempt (metadata)
-    file_chunk_received = pyqtSignal(tuple) # Signals arrival of a data chunk
-    file_end_received = pyqtSignal(dict) # Signals transfer completion
+    # Qt signals for thread-safe GUI updates
+    file_start_received = pyqtSignal(dict)    # Emitted when FILE_START received: (metadata)
+    file_chunk_received = pyqtSignal(tuple)  # Emitted when FILE_CHUNK received: (chunk_info)
+    file_end_received = pyqtSignal(dict)     # Emitted when FILE_END received: (metadata)
     
     def __init__(self, network_manager):
+        """
+        Initialize the UDP listener thread.
+        
+        Args:
+            network_manager: NetworkManager instance to use for UDP operations
+        """
         super().__init__()
         self.network_manager = network_manager
         self.running = True
     
     def run(self):
-        """Starts the UDP listening socket and processes incoming packets."""
+        """
+        Main thread execution loop.
+        Starts UDP listener and processes incoming file transfer packets.
+        """
         self.network_manager.start_udp_listener()
         while self.running:
             # receive_udp_message handles packet parsing and sends ACKs
             msg_type, data = self.network_manager.receive_udp_message()
             
-            # Emit the corresponding signal based on the packet type
+            # Route packet to appropriate signal based on type
             if msg_type == 'FILE_START':
                 self.file_start_received.emit(data)
             elif msg_type == 'FILE_CHUNK':
@@ -167,19 +201,30 @@ class UDPListenerThread(QThread):
                 self.file_end_received.emit(data)
     
     def stop(self):
-        """Safely stops the UDP listener thread."""
+        """
+        Stop the thread execution loop.
+        """
         self.running = False
 
 # ------------------- File Transfer (QThread) -------------------
 class FileTransferThread(QThread):
     """
-    Manages the outgoing file transfer process using the NetworkManager's UDP protocol.
+    Background thread for sending files via UDP to a peer.
+    Runs file transfer in background to avoid blocking the GUI.
     """
-    # Signals emitted to update the GUI progress bar
-    transfer_progress = pyqtSignal(int, int) # Emits current chunk number and size sent
-    transfer_complete = pyqtSignal()
+    # Qt signals for thread-safe GUI updates
+    transfer_progress = pyqtSignal(int, int)  # Emitted per chunk: (chunk_number, chunk_size)
+    transfer_complete = pyqtSignal()         # Emitted when transfer completes
     
     def __init__(self, network_manager, peer_id, file_path):
+        """
+        Initialize the file transfer thread.
+        
+        Args:
+            network_manager: NetworkManager instance to use for file transfer
+            peer_id: Username of the peer to send file to
+            file_path: Path to the file to send
+        """
         super().__init__()
         self.network_manager = network_manager
         self.peer_id = peer_id
@@ -187,12 +232,11 @@ class FileTransferThread(QThread):
     
     def run(self):
         """
-        Initiates the file sending process and yields progress updates.
-        The `send_file_udp` function acts as a generator, yielding chunks as they are successfully sent and ACKed.
+        Main thread execution.
+        Sends file via UDP and emits progress signals.
         """
-        # Iterate over the progress generator returned by send_file_udp
+        # Send file and emit progress for each chunk
         for chunk_number, chunk_size in self.network_manager.send_file_udp(self.peer_id, self.file_path):
             self.transfer_progress.emit(chunk_number, chunk_size)
-            
-        # Signal completion once the generator finishes
+        # Signal completion
         self.transfer_complete.emit()
