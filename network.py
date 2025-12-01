@@ -2,7 +2,7 @@
 network.py - Core networking functionality for TCP chat and UDP file transfer
 Handles all socket operations, peer discovery, and server communication
 """
-from socket import * # Import all from socket module
+from socket import *
 import json
 import base64
 import os
@@ -11,24 +11,16 @@ import time
 from aes_utils import generate_aes_key, aes_encrypt, aes_decrypt
 import rsa
 
-# Server configuration (Central Registry for P2P discovery)
+# Server configuration
 serverPort = 7777
 serverIP = '127.0.0.1'
 
 # File transfer configuration
-CHUNK_SIZE = 4096  # 4KB chunks for UDP file transfer
+CHUNK_SIZE = 4096  # 4KB chunks for UDP file transfer
 
 class NetworkManager:
 
     def __init__(self, username, private_key, public_key):
-        """
-        Initialize the network manager with user credentials.
-        
-        Args:
-            username: User's username
-            private_key: RSA private key for decrypting messages
-            public_key: RSA public key for encrypting messages
-        """
         self.username = username
         self.private_key = private_key
         self.public_key = public_key
@@ -75,8 +67,6 @@ class NetworkManager:
                 return {}
             data = json.loads(data.decode())
             updated = {}
-            
-            # Filter out self from peer list
             for peer_username, peer_info in data.items():
                 if peer_username == self.username:
                     continue
@@ -84,7 +74,7 @@ class NetworkManager:
                     "ip": peer_info["ip"],
                     "tcp_port": peer_info["tcp_port"],
                     "udp_port": peer_info["udp_port"],
-                    "public_key": peer_info["public_key"]  # RSA Public Key in Base64
+                    "public_key": peer_info["public_key"]  # keep as base64 string
                 }
             self.peer_list = updated
             return updated
@@ -100,7 +90,7 @@ class NetworkManager:
             if self.server_socket.recv(1024).decode() == "ACK":
                 return True
         except:
-            pass # Server connection likely lost
+            pass
         return False
 
     def signal_communication(self, type, sender, receiver):
@@ -114,11 +104,9 @@ class NetworkManager:
     def start_tcp_listener(self):
         try:
             self.tcp_listener_socket = socket(AF_INET, SOCK_STREAM)
-            # Bind to all interfaces (0.0.0.0)
             self.tcp_listener_socket.bind(('0.0.0.0', self.tcp_port))
             self.tcp_listener_socket.listen(5)
-            self.tcp_listener_socket.settimeout(1.0) # Set timeout for non-blocking operation
-            # Get the dynamically assigned port number
+            self.tcp_listener_socket.settimeout(1.0)
             self.tcp_port = self.tcp_listener_socket.getsockname()[1]
             return True
         except Exception as e:
@@ -139,16 +127,12 @@ class NetworkManager:
         """Establish TCP connection to a peer"""
         if peer_username not in self.peer_list:
             return None
-        
-        # Return existing connection if already connected
         if peer_username in self.active_peer_connections:
-            return self.active_peer_connections[peer_username] # Return existing socket
+            return self.active_peer_connections[peer_username]
 
         try:
             peer = self.peer_list[peer_username]
-            # Create and establish TCP connection
             sock = socket(AF_INET, SOCK_STREAM)
-            # Connect using the IP and TCP port from the peer list
             sock.connect((peer["ip"], peer["tcp_port"]))
             self.active_peer_connections[peer_username] = sock
 
@@ -158,10 +142,7 @@ class NetworkManager:
                 peer_pub_key = rsa.PublicKey.load_pkcs1(peer_pub_bytes)
                 encrypted_aes = rsa.encrypt(self.aes_key, peer_pub_key)
                 encrypted_b64 = base64.b64encode(encrypted_aes).decode()
-                
-                # Send the encrypted AES key to the peer
                 print("sending aes key")
-                # Send encrypted AES key to peer
                 sock.send(f"AES_KEY:{encrypted_b64}".encode())
             return sock
         except Exception as e:
@@ -172,17 +153,15 @@ class NetworkManager:
         try:
             data = peer_socket.recv(8192)
             if not data:
-                # Peer closed the connection gracefully
+                # Peer closed the connection
                 return None, None, True
 
             message = data.decode()
 
             # If AES_KEY, save it with a temporary key
             if message.startswith("AES_KEY:"):
-                # Extract and decrypt the AES key
                 encrypted_key_b64 = message[len("AES_KEY:"):]
                 encrypted_bytes = base64.b64decode(encrypted_key_b64)
-                # Decrypt the received AES key using the client's RSA private key
                 aes_key = rsa.decrypt(encrypted_bytes, self.private_key)
                 print('AES Key decrypted:', aes_key)
 
@@ -192,9 +171,8 @@ class NetworkManager:
                 return None, None, False
 
             print('Before Splitting and Decrypting: ', message)
-            # Handle normal encrypted messages
+            # For normal messages
             if "|" in message:
-                # Format: "username|encrypted_base64"
                 peer_username, enc_bytes = message.split("|", 1)
                 if peer_username not in self.active_peer_connections:
                     self.active_peer_connections[peer_username] = peer_socket
@@ -204,9 +182,7 @@ class NetworkManager:
                 if temp_key in self.peer_aes_keys:
                     self.peer_aes_keys[peer_username] = self.peer_aes_keys.pop(temp_key)
 
-                # Decrypt message if AES key is available
                 if peer_username in self.peer_aes_keys:
-                    # Decrypt the message using the peer's AES key
                     encrypted_bytes = base64.b64decode(enc_bytes)
                     plaintext = aes_decrypt(self.peer_aes_keys[peer_username], encrypted_bytes)
                     return peer_username, plaintext.decode(), False
@@ -219,7 +195,6 @@ class NetworkManager:
             # Peer forcibly closed connection
             return None, None, True
         except timeout:
-            # No data available (non-blocking receive)
             return None, None, False
         except Exception as e:
             print(f"Error decrypting TCP message: {e}")
@@ -231,9 +206,7 @@ class NetworkManager:
             return False
         
         try:
-            # Encrypt message with AES key
             plaintext = message.encode()
-            # Encrypt the message using the client's AES key
             encrypted_bytes = aes_encrypt(self.aes_key, plaintext)
             encrypted_b64 = base64.b64encode(encrypted_bytes).decode()  # safe string
 
@@ -266,20 +239,17 @@ class NetworkManager:
     # UDP FILE TRANSFER
     # -------------------------------------------------------------
     def send_file_udp(self, peer_username, file_path):
-        """
-        Sends a file to a peer using a custom reliable UDP protocol 
-        (Stop-and-Wait ARQ) with chunking and resume support.
-        """
-        if peer_username not in self.peer_list or not os.path.exists(file_path):
+        if peer_username not in self.peer_list:
+            return False
+        if not os.path.exists(file_path):
             return False
 
         peer = self.peer_list[peer_username]
         ip = peer["ip"]
         udp_port = peer["udp_port"]
+
         file_size = os.path.getsize(file_path)
         file_name = os.path.basename(file_path)
-        
-        # 
 
         def wait_for_ack(expected_id, timeout_sec=0.5):
             """Wait for a specific ACK ID, resend packet if timeout."""
@@ -288,7 +258,7 @@ class NetworkManager:
                 data, _ = self.udp_listener_socket.recvfrom(1024)
                 if data[0] == 4:  # ACK
                     ack_id = struct.unpack("!I", data[1:5])[0]
-                    print('received ACK from the file chunk transfer, ACK: ', ack_id)
+                    print('received ACK from the file chunck transfer, ACK: ', ack_id)
                     return ack_id == expected_id
                 return False
             except timeout:
@@ -311,25 +281,29 @@ class NetworkManager:
             # Wait briefly for FILE_RESUME
             resume_offset = 0
             start_time = time.time()
-            while time.time() - start_time < 1.0:  # 1 second max wait
-                # The receiver (receive_udp_message) will send a FILE_RESUME packet (Type 5)
+            while time.time() - start_time < 1.0:  # 1 second max wait
                 msg_type, data = self.receive_udp_message()[:2]
                 if msg_type == "FILE_RESUME" and data["filename"] == file_name:
                     resume_offset = data["received"]
                     break
-            
+            """
+            reserved_ack = 999999000
+            while True:
+                self.udp_listener_socket.sendto(packet, (ip, udp_port))
+                if wait_for_ack(reserved_ack):
+                    break
+            """
             # -------------------------------------------------------
             # 2) SEND FILE CHUNKS WITH ACKs
             # -------------------------------------------------------
-            # Calculate starting chunk number based on resume offset
             chunk_number = resume_offset // CHUNK_SIZE
             with open(file_path, "rb") as f:
-                # Move file pointer to resume position (for partial file resume)
+                # Move file pointer to resume position
                 f.seek(resume_offset)
                 while True:
                     chunk = f.read(CHUNK_SIZE)
                     if not chunk:
-                        break  # End of file
+                        break
 
                     header = b"\x02" + struct.pack("!II", chunk_number, len(chunk))
                     packet = header + chunk
@@ -340,7 +314,6 @@ class NetworkManager:
                         if wait_for_ack(chunk_number):
                             break
 
-                    # Yield progress information
                     yield chunk_number, len(chunk)
                     chunk_number += 1
 
@@ -359,8 +332,6 @@ class NetworkManager:
                 self.udp_listener_socket.sendto(packet, (ip, udp_port))
                 if wait_for_ack(reserved_ack):
                     break
-            
-            # Notify server of file transfer completion
             self.signal_communication('FILESENT', self.username, peer_username)
             return True
 
@@ -394,6 +365,7 @@ class NetworkManager:
                 sender_name = meta["sender"]
                 partial_dir = "received_files"
                 os.makedirs(partial_dir, exist_ok=True)
+
                 partial_path = os.path.join(partial_dir, filename + ".part")
 
                 # Determine how many bytes are already downloaded
@@ -404,7 +376,7 @@ class NetworkManager:
                 # Send FILE_RESUME response (type 5)
                 resume_info = {
                     "filename": filename,
-                    "received": received_bytes, # Tell the sender where to resume
+                    "received": received_bytes,
                     "sender": sender_name
                 }
                 resume_bytes = json.dumps(resume_info).encode("utf-8")
@@ -445,7 +417,6 @@ class NetworkManager:
             # FILE_RESUME (Receiver tells sender how many bytes exist)
             # -------------------------------------------------------
             if msg_type == 5:
-                # Parse resume information: [length(4 bytes)][json_data]
                 meta_len = struct.unpack("!I", payload[:4])[0]
                 meta = json.loads(payload[4:4+meta_len].decode("utf-8"))
                 return "FILE_RESUME", meta
@@ -454,7 +425,6 @@ class NetworkManager:
             # ACK
             # -------------------------------------------------------
             if msg_type == 4:
-                # Parse ACK ID: [ack_id(4 bytes)]
                 ack_id = struct.unpack("!I", payload[:4])[0]
                 return "ACK", ack_id
 
@@ -471,23 +441,15 @@ class NetworkManager:
     # -----------------------------
     def close_all(self):
         self.running = False
-        
-        # Close server connection
         if self.server_socket:
             try: self.server_socket.close()
             except: pass
-        
-        # Close all peer connections
         for s in self.active_peer_connections.values():
             try: s.close()
             except: pass
-        
-        # Close TCP listener
         if self.tcp_listener_socket:
             try: self.tcp_listener_socket.close()
             except: pass
-        
-        # Close UDP listener
         if self.udp_listener_socket:
             try: self.udp_listener_socket.close()
             except: pass
